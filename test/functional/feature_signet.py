@@ -87,7 +87,10 @@ class SignetBasicTest(BitcoinTestFramework):
         check_getmininginfo(node_idx=3, signet_idx=1)
         check_getmininginfo(node_idx=4, signet_idx=2)
 
-        self.generate(self.nodes[0], 1, sync_fun=self.no_op)
+        while not self.generate(self.nodes[0], 1, sync_fun=lambda: self.sync_blocks(self.nodes[0:2])):
+            pass
+        self.wait_until(lambda: self.nodes[0].getblockcount() == 1)
+        self.wait_until(lambda: self.nodes[1].getblockcount() == 1)
 
         self.log.info("pregenerated signet blocks check")
 
