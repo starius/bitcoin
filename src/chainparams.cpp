@@ -74,13 +74,13 @@ void ParseWrappedSignetChallenge(const std::vector<uint8_t>& wrappedChallenge, s
 namespace {
 
 struct SignetParamsPayload {
-    static constexpr uint8_t CURRENT_VERSION = 0x01;
-    uint8_t version{CURRENT_VERSION};
-    int64_t pow_target_spacing{10 * 60};
+    static constexpr uint64_t CURRENT_VERSION = 0x01;
+    uint64_t version = CURRENT_VERSION;
+    int64_t pow_target_spacing = 10 * 60;
 
     SERIALIZE_METHODS(SignetParamsPayload, obj)
     {
-        READWRITE(obj.version);
+        READWRITE(COMPACTSIZE(obj.version));
         if (obj.version == CURRENT_VERSION) {
             READWRITE(obj.pow_target_spacing);
         } else if (ser_action.ForRead()) {

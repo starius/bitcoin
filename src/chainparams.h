@@ -40,7 +40,8 @@ void SelectParams(const ChainType chain);
 void ParseWrappedSignetChallenge(const std::vector<uint8_t>& wrappedChallenge, std::vector<uint8_t>& outParams, std::vector<uint8_t>& outChallenge);
 
 /**
- * Parses signet options encoded as a serialized struct with a version byte.
+ * Parses signet options encoded as a serialized struct with a CompactSize
+ * version field.
  * Currently supported payloads:
  *  - Empty (no-op)
  *  - Version 0x01: pow_target_spacing as int64_t little endian.
