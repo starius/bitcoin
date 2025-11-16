@@ -81,3 +81,25 @@ These steps can instead be done explicitly:
 This is intended to allow you to replace part of the pipeline for further experimentation (eg, to sign the block with a hardware wallet).
 
 For custom signets with a trivial challenge such as `OP_TRUE` and `OP_2` the walletprocesspsbt step can be skipped.
+
+Wrapped signet challenge parameters
+-----------------------------------
+
+Custom signet challenges may optionally be *wrapped* to include configuration
+bytes in addition to the actual consensus script. A wrapped challenge is a
+script of the form:
+
+```
+OP_RETURN PUSHDATA<params> PUSHDATA<actual challenge>
+```
+
+Nodes treat `<actual challenge>` as the enforcement script, and parse
+`<params>` as a serialized structure (little-endian) prefixed with a CompactSize
+version field. Unknown versions cause deserialization to fail, which prevents
+nodes that do not understand newer fields from joining such a network. Version
+`0x01` defines a single 8‑byte integer specifying the desired block target
+spacing in seconds. For example, a spacing of 30 seconds would encode as:
+
+```
+01 1e00000000000000
+```
