@@ -149,7 +149,7 @@ BOOST_AUTO_TEST_CASE(parse_signet_params)
             {
                     "021e00000000000000",
                     600,
-                    "failed to deserialize signet params: Attempted to read unknown signet params version 2.: iostream error",
+                    "failed to deserialize signet params: Unknown signet params version 2, versions [0x01] supported.: iostream error",
             },
             {
                     "011e0000000000000000",

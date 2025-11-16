@@ -84,7 +84,7 @@ struct SignetParamsPayload {
         if (obj.version == CURRENT_VERSION) {
             READWRITE(obj.pow_target_spacing);
         } else if (ser_action.ForRead()) {
-            throw std::ios_base::failure(strprintf("Attempted to read unknown signet params version %u.", obj.version));
+            throw std::ios_base::failure(strprintf("Unknown signet params version %u, versions [0x01] supported.", obj.version));
         } else {
             throw std::ios_base::failure(strprintf("Attempted to write unknown signet params version %u.", obj.version));
         }
