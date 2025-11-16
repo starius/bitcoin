@@ -11,6 +11,9 @@
 #include <deploymentinfo.h>
 #include <logging.h>
 #include <script/script.h>
+#include <serialize.h>
+#include <span.h>
+#include <streams.h>
 #include <tinyformat.h>
 #include <util/chaintype.h>
 #include <util/strencodings.h>
@@ -68,45 +71,49 @@ void ParseWrappedSignetChallenge(const std::vector<uint8_t>& wrappedChallenge, s
     outChallenge.swap(challenge);
 }
 
+namespace {
+
+struct SignetParamsPayload {
+    static constexpr uint8_t CURRENT_VERSION = 0x01;
+    uint8_t version{CURRENT_VERSION};
+    int64_t pow_target_spacing{10 * 60};
+
+    SERIALIZE_METHODS(SignetParamsPayload, obj)
+    {
+        READWRITE(obj.version);
+        if (obj.version == CURRENT_VERSION) {
+            READWRITE(obj.pow_target_spacing);
+        } else if (ser_action.ForRead()) {
+            throw std::ios_base::failure(strprintf("Attempted to read unknown signet params version %u.", obj.version));
+        } else {
+            throw std::ios_base::failure(strprintf("Attempted to write unknown signet params version %u.", obj.version));
+        }
+    }
+};
+
+} // namespace
+
 void ParseSignetParams(const std::vector<uint8_t>& params, CChainParams::SigNetOptions& options) {
     if (params.empty()) {
         return;
     }
 
-    // Params are encoded as a concatenation of (field_id, value) tuples. Iterate over
-    // each tuple to support backwards-compatible extensions in the future.
-    constexpr size_t POW_TARGET_SPACING_FIELD_LEN = sizeof(int64_t);
-    size_t pos = 0;
-    int last_field_id = -1;
-    while (pos < params.size()) {
-        const uint8_t field_id = params[pos++];
-        if (field_id <= last_field_id) {
-            throw std::runtime_error(strprintf("signet params field 0x%02x must be in strictly increasing order.", field_id));
+    SignetParamsPayload payload;
+    try {
+        DataStream ss{MakeUCharSpan(params)};
+        ss >> payload;
+        if (!ss.empty()) {
+            throw std::runtime_error("signet params had unexpected trailing data.");
         }
-        last_field_id = field_id;
-        switch (field_id) {
-        case 0x01: {
-            // Field 0x01 encodes pow_target_spacing as an int64_t in little-endian
-            // order, so each occurrence must be followed by exactly 8 bytes.
-            if (params.size() - pos < POW_TARGET_SPACING_FIELD_LEN) {
-                throw std::runtime_error(strprintf("signet params field 0x01 requires %d bytes, got %d.", POW_TARGET_SPACING_FIELD_LEN, params.size() - pos));
-            }
-            uint64_t value = 0;
-            for (size_t i = 0; i < POW_TARGET_SPACING_FIELD_LEN; ++i) {
-                value |= uint64_t(params[pos + i]) << (8 * i);
-            }
-            pos += POW_TARGET_SPACING_FIELD_LEN;
-            int64_t pow_target_spacing = int64_t(value);
-            if (pow_target_spacing <= 0) {
-                throw std::runtime_error("signet param pow_target_spacing <= 0.");
-            }
-            options.pow_target_spacing = pow_target_spacing;
-            break;
-        }
-        default:
-            throw std::runtime_error(strprintf("unknown signet params field 0x%02x.", field_id));
-        }
+    } catch (const std::ios_base::failure& e) {
+        throw std::runtime_error(strprintf("failed to deserialize signet params: %s", e.what()));
     }
+
+    if (payload.pow_target_spacing <= 0) {
+        throw std::runtime_error("signet param pow_target_spacing <= 0.");
+    }
+
+    options.pow_target_spacing = payload.pow_target_spacing;
 }
 
 void ReadSigNetArgs(const ArgsManager& args, CChainParams::SigNetOptions& options)

@@ -40,12 +40,11 @@ void SelectParams(const ChainType chain);
 void ParseWrappedSignetChallenge(const std::vector<uint8_t>& wrappedChallenge, std::vector<uint8_t>& outParams, std::vector<uint8_t>& outChallenge);
 
 /**
- * Parses signet options encoded as (field_id, value) tuples.
- * Field ids must appear at most once and in strictly increasing order.
- * Currently supported fields:
+ * Parses signet options encoded as a serialized struct with a version byte.
+ * Currently supported payloads:
  *  - Empty (no-op)
- *  - 0x01 (pow_target_spacing as int64_t little endian) => set pow_target_spacing.
- * Any unknown field_id or malformed value throws an exception.
+ *  - Version 0x01: pow_target_spacing as int64_t little endian.
+ * Unknown versions, malformed payloads, or invalid values throw an exception.
  */
 void ParseSignetParams(const std::vector<uint8_t>& params, CChainParams::SigNetOptions& options);
 

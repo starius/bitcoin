@@ -132,24 +132,29 @@ BOOST_AUTO_TEST_CASE(parse_signet_params)
                     "",
             },
             {
-                    "011e0000000000000001e8030000000000",
-                    600,
-                    "signet params field 0x01 must be in strictly increasing order.",
-            },
-            {
-                    "012502",
-                    600,
-                    "signet params field 0x01 requires 8 bytes, got 2.",
-            },
-            {
-                    "022502000000000000",
-                    600,
-                    "unknown signet params field 0x02.",
-            },
-            {
-                    "01ffffffffffffffff",
+                    "010000000000000000",
                     600,
                     "signet param pow_target_spacing <= 0.",
+            },
+            {
+                    "010000000000000002010000000000000003",
+                    600,
+                    "signet params had unexpected trailing data.",
+            },
+            {
+                    "01",
+                    600,
+                    "failed to deserialize signet params: DataStream::read(): end of data: iostream error",
+            },
+            {
+                    "021e00000000000000",
+                    600,
+                    "failed to deserialize signet params: Attempted to read unknown signet params version 2.: iostream error",
+            },
+            {
+                    "011e0000000000000000",
+                    600,
+                    "signet params had unexpected trailing data.",
             },
     };
 
