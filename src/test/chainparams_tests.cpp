@@ -132,14 +132,19 @@ BOOST_AUTO_TEST_CASE(parse_signet_params)
                     "",
             },
             {
+                    "011e0000000000000001e8030000000000",
+                    600,
+                    "signet params field 0x01 must be in strictly increasing order.",
+            },
+            {
                     "012502",
                     600,
-                    "signet params must have length 9, got 3.",
+                    "signet params field 0x01 requires 8 bytes, got 2.",
             },
             {
                     "022502000000000000",
                     600,
-                    "signet params[0] must be 0x01, got 0x02.",
+                    "unknown signet params field 0x02.",
             },
             {
                     "01ffffffffffffffff",
