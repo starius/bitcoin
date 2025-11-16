@@ -122,6 +122,11 @@ class SignetBasicTest(BitcoinTestFramework):
         self.nodes[0].assert_start_raises_init_error(extra_args=["-signetchallenge=abc"], expected_msg="Error: -signetchallenge must be hex, not 'abc'.")
         self.nodes[0].assert_start_raises_init_error(extra_args=["-signetchallenge=abc"] * 2, expected_msg="Error: -signetchallenge cannot be multiple values.")
 
+        self.log.info("regression: large pow_target_spacing does not crash generatetoaddress")
+        large_spacing_challenge = "6a4c09011effff00000000004c0151"
+        self.restart_node(7, extra_args=["-prune=550", f"-signetchallenge={large_spacing_challenge}"])
+        self.generatetodescriptor(self.nodes[7], 1, "raw(51)", sync_fun=self.no_op, maxtries=1_000_000)
+
 
 if __name__ == '__main__':
     SignetBasicTest(__file__).main()
