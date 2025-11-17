@@ -64,6 +64,32 @@ When --multiminer is used, if a miner is down and does not mine a block within f
 
 The --standby-delay parameter can be used to make a backup miner that only mines if a block doesn't arrive on time. This can be combined with --multiminer if desired. Setting --standby-delay also prevents the first block from being mined immediately.
 
+Challenge construction
+----------------------
+
+The `makechallenge` subcommand can be used to construct custom signet challenges
+and optional wrapped parameters. For example:
+
+* Trivial `OP_TRUE` challenge with a 30-second spacing:
+
+      $MINER makechallenge --op-true --target-spacing=30
+
+* Single-signer challenge:
+
+      $MINER makechallenge --pubkey=<hex pubkey>
+
+* Wrapped challenge:
+
+      $MINER makechallenge --actual-challenge=<actual challenge>
+
+If no parameters are supplied the command emits the bare challenge script. When
+`--target-spacing` (or `--wrap`) is provided the output is an `OP_RETURN`-wrapped
+challenge suitable for `bitcoind -signetchallenge=...`.
+
+The `generate` subcommand accepts `--challenge=<hex>` to override the node's
+signet challenge. When the supplied challenge is wrapped, the miner
+automatically derives parameters such as the target spacing from it.
+
 Advanced usage
 --------------
 
@@ -103,3 +129,6 @@ spacing in seconds. For example, a spacing of 30 seconds would encode as:
 ```
 01 1e00000000000000
 ```
+
+You can use `makechallenge` subcommand to automate challenge creation, including
+wrapped challenges.

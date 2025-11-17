@@ -10,18 +10,21 @@ import math
 import os
 import re
 import shlex
+import struct
+import subprocess
 import sys
 import time
-import subprocess
 
 PATH_BASE_CONTRIB_SIGNET = os.path.abspath(os.path.dirname(os.path.realpath(__file__)))
 PATH_BASE_TEST_FUNCTIONAL = os.path.abspath(os.path.join(PATH_BASE_CONTRIB_SIGNET, "..", "..", "test", "functional"))
 sys.path.insert(0, PATH_BASE_TEST_FUNCTIONAL)
 
+from io import BytesIO
+
 from test_framework.blocktools import get_witness_script, script_BIP34_coinbase_height, SIGNET_HEADER # noqa: E402
-from test_framework.messages import CBlock, CBlockHeader, COutPoint, CTransaction, CTxIn, CTxInWitness, CTxOut, from_binary, from_hex, ser_string, ser_uint256, tx_from_hex, MAX_SEQUENCE_NONFINAL # noqa: E402
+from test_framework.messages import CBlock, CBlockHeader, COutPoint, CTransaction, CTxIn, CTxInWitness, CTxOut, deser_compact_size, from_binary, from_hex, ser_compact_size, ser_string, ser_uint256, tx_from_hex, MAX_SEQUENCE_NONFINAL # noqa: E402
 from test_framework.psbt import PSBT, PSBTMap, PSBT_GLOBAL_UNSIGNED_TX, PSBT_IN_FINAL_SCRIPTSIG, PSBT_IN_FINAL_SCRIPTWITNESS, PSBT_IN_NON_WITNESS_UTXO, PSBT_IN_SIGHASH_TYPE # noqa: E402
-from test_framework.script import CScript, CScriptOp # noqa: E402
+from test_framework.script import CScript, CScriptOp, CScriptInvalidError, OP_CHECKSIG, OP_RETURN, OP_TRUE # noqa: E402
 
 logging.basicConfig(
     format='%(asctime)s %(levelname)s %(message)s',
@@ -30,7 +33,70 @@ logging.basicConfig(
 
 PSBT_SIGNET_BLOCK = b"\xfc\x06signetb"    # proprietary PSBT global field holding the block being signed
 RE_MULTIMINER = re.compile(r"^(\d+)(-(\d+))?/(\d+)$")
+DEFAULT_TARGET_SPACING = 600
 
+def encode_signet_params(target_spacing):
+    if target_spacing is None:
+        return b""
+    if target_spacing <= 0:
+        raise ValueError("target spacing must be positive")
+    return ser_compact_size(0x01) + struct.pack("<q", target_spacing)
+
+def decode_signet_params(params):
+    if not params:
+        return {}
+    stream = BytesIO(params)
+    version = deser_compact_size(stream)
+    if version != 0x01:
+        raise ValueError(f"Unknown signet params version 0x{version:02x}")
+    spacing_bytes = stream.read(8)
+    if len(spacing_bytes) < 8:
+        raise ValueError("signet params truncated")
+    spacing = struct.unpack("<q", spacing_bytes)[0]
+    if spacing <= 0:
+        raise ValueError("signet param pow_target_spacing <= 0")
+    if stream.read():
+        raise ValueError("signet params had unexpected trailing data")
+    return {"target_spacing": spacing}
+
+def encode_push(data):
+    length = len(data)
+    if length < 0x4c:
+        return bytes([length]) + data
+    if length <= 0xff:
+        return b"\x4c" + bytes([length]) + data
+    if length <= 0xffff:
+        return b"\x4d" + length.to_bytes(2, "little") + data
+    return b"\x4e" + length.to_bytes(4, "little") + data
+
+def wrap_challenge(params, actual):
+    return bytes([OP_RETURN]) + encode_push(params) + encode_push(actual)
+
+def unwrap_challenge_hex(challenge_hex):
+    script_bytes = bytes.fromhex(challenge_hex)
+    if not script_bytes or script_bytes[0] != OP_RETURN:
+        return b"", script_bytes
+    script = CScript(script_bytes)
+    params = None
+    challenge = None
+    count = 0
+    try:
+        for opcode, data, _ in script.raw_iter():
+            if count == 0:
+                if opcode != OP_RETURN:
+                    raise ValueError("wrapped challenge must start with OP_RETURN")
+            elif data is None:
+                raise ValueError(f"operation {count} of wrapped challenge must push data, got opcode 0x{int(opcode):02x}")
+            elif count == 1:
+                params = data
+            elif count == 2:
+                challenge = data
+            count += 1
+    except CScriptInvalidError as e:
+        raise ValueError(str(e))
+    if count != 3:
+        raise ValueError(f"wrapped challenge must have exactly three operations, got {count}")
+    return params, challenge
 def signet_txs(block, challenge):
     # assumes signet solution has not been added yet so does not need
     # to be removed
@@ -247,6 +313,36 @@ def trivial_challenge(spkhex):
         return True
     return False
 
+def build_actual_challenge(actual_hex=None, pubkey_hex=None, op_true=False):
+    if actual_hex:
+        return bytes.fromhex(actual_hex)
+    if pubkey_hex:
+        pubkey = bytes.fromhex(pubkey_hex)
+        if len(pubkey) not in (33, 65) or pubkey[0] not in (2, 3, 4):
+            raise ValueError("pubkey must be a 33-byte compressed or 65-byte uncompressed key")
+        return bytes(CScript([pubkey, OP_CHECKSIG]))
+    if op_true:
+        return bytes(CScript([OP_TRUE]))
+    raise ValueError("Must supply --actual-challenge, --pubkey, or --op-true")
+
+def do_makechallenge(args):
+    try:
+        actual = build_actual_challenge(args.actual_challenge, args.pubkey, args.op_true)
+    except ValueError as e:
+        logging.error("Invalid challenge data: %s", e)
+        return 1
+    try:
+        params = encode_signet_params(args.target_spacing)
+    except ValueError as e:
+        logging.error("%s", e)
+        return 1
+    if params or args.wrap:
+        challenge = wrap_challenge(params, actual)
+    else:
+        challenge = actual
+    print(challenge.hex())
+    return 0
+
 class Generate:
 
     def __init__(self, multiminer=None, ultimate_target=None, poisson=False, max_interval=1800,
@@ -368,6 +464,30 @@ class Generate:
         return finish_block(block, signet_solution, grind_cmd)
 
 def do_generate(args):
+    override_challenge = None
+    spacing_from_challenge = None
+    if args.challenge:
+        try:
+            params, challenge_bytes = unwrap_challenge_hex(args.challenge)
+        except ValueError as e:
+            logging.error("Invalid challenge: %s", e)
+            return 1
+        override_challenge = challenge_bytes.hex()
+        try:
+            spacing_from_challenge = decode_signet_params(params).get("target_spacing")
+        except ValueError as e:
+            logging.error("Failed to parse wrapped challenge parameters: %s", e)
+            return 1
+        if spacing_from_challenge is not None:
+            logging.info("Using target spacing %d seconds from wrapped challenge", spacing_from_challenge)
+
+    if args.target_spacing is not None:
+        target_spacing = args.target_spacing
+    elif spacing_from_challenge is not None:
+        target_spacing = spacing_from_challenge
+    else:
+        target_spacing = DEFAULT_TARGET_SPACING
+
     if args.set_block_time is not None:
         max_blocks = 1
     elif args.max_blocks is not None:
@@ -412,7 +532,7 @@ def do_generate(args):
             return 1
         my_blocks = (start-1, stop, total)
 
-    max_interval_limit = args.target_spacing * 16 / 10
+    max_interval_limit = target_spacing * 16 / 10
     if args.max_interval < max_interval_limit:
         logging.error("--max-interval must be at least %d (%f minutes)" % (max_interval_limit, max_interval_limit/60))
         return 1
@@ -422,7 +542,8 @@ def do_generate(args):
     ultimate_target = nbits_to_target(int(args.nbits,16))
 
     gen = Generate(multiminer=my_blocks, ultimate_target=ultimate_target, poisson=args.poisson, max_interval=args.max_interval,
-                   standby_delay=args.standby_delay, backup_delay=args.backup_delay, set_block_time=args.set_block_time, poolid=poolid, target_spacing=args.target_spacing)
+                   standby_delay=args.standby_delay, backup_delay=args.backup_delay, set_block_time=args.set_block_time,
+                   poolid=poolid, target_spacing=target_spacing)
 
     mined_blocks = 0
     bestheader = {"hash": None}
@@ -465,6 +586,8 @@ def do_generate(args):
         tmpl = gen.gbt(args.bcli, bci["bestblockhash"], now)
         if tmpl is None:
             continue
+        if override_challenge is not None:
+            tmpl["signet_challenge"] = override_challenge
 
         logging.debug("GBT template: %s", tmpl)
 
@@ -565,7 +688,17 @@ def main():
     generate.add_argument("--backup-delay", default=300, type=int, help="Seconds to delay before mining blocks reserved for other miners (default=300)")
     generate.add_argument("--standby-delay", default=0, type=int, help="Seconds to delay before mining blocks (default=0)")
     generate.add_argument("--max-interval", default=1800, type=int, help="Maximum interblock interval (seconds)")
-    generate.add_argument("--target-spacing", default=600, type=int, help="Target interval between blocks (seconds), property of the network (default 600)")
+    generate.add_argument("--target-spacing", default=None, type=int, help="Target interval between blocks (seconds). Defaults to 600 unless provided by a wrapped challenge.")
+    generate.add_argument("--challenge", default=None, type=str, help="Override the signet challenge hex. Wrapped challenges may include parameters like target spacing.")
+
+    makechallenge = cmds.add_parser("makechallenge", help="Construct a (wrapped) signet challenge")
+    makechallenge.set_defaults(fn=do_makechallenge)
+    makechallenge.add_argument("--target-spacing", default=None, type=int, help="Optional pow target spacing to encode (seconds)")
+    actual = makechallenge.add_mutually_exclusive_group()
+    actual.add_argument("--actual-challenge", default=None, type=str, help="Hex-encoded actual challenge script")
+    actual.add_argument("--pubkey", default=None, type=str, help="Convenience option to build a CHECKSIG challenge from a pubkey")
+    actual.add_argument("--op-true", action="store_true", help="Use OP_TRUE as the challenge")
+    makechallenge.add_argument("--wrap", action="store_true", help="Wrap the challenge even if no parameters are present")
 
     calibrate = cmds.add_parser("calibrate", help="Calibrate difficulty")
     calibrate.set_defaults(fn=do_calibrate)
