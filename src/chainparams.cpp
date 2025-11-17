@@ -54,8 +54,8 @@ void ParseWrappedSignetChallenge(const std::vector<uint8_t>& wrappedChallenge, s
             // OP_RETURN.
             continue;
         }
-        if (opcode != OP_PUSHDATA1 && opcode != OP_PUSHDATA2 && opcode != OP_PUSHDATA4) {
-                throw std::runtime_error(strprintf("operation %d of wrapped challenge script must be a PUSHDATA opcode, got 0x%02x.", i, opcode));
+        if (opcode > OP_PUSHDATA4) {
+            throw std::runtime_error(strprintf("operation %d of wrapped challenge script must push data, got opcode 0x%02x.", i, opcode));
         }
         if (i == 1) {
             params.swap(push_data);

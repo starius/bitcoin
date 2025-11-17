@@ -36,6 +36,12 @@ BOOST_AUTO_TEST_CASE(parse_wrapped_signet_challenge)
                     "",
             },
             {
+                    "6a09011e000000000000000151",
+                    "011e00000000000000",
+                    "51",
+                    "",
+            },
+            {
                     "6a4c004c25512102f7561d208dd9ae99bf497273e16f389bdbd6c4742ddb8e6b216e64fa2928ad8f51ae",
                     "",
                     "512102f7561d208dd9ae99bf497273e16f389bdbd6c4742ddb8e6b216e64fa2928ad8f51ae",
@@ -69,13 +75,13 @@ BOOST_AUTO_TEST_CASE(parse_wrapped_signet_challenge)
                     "6a6a4c25512102f7561d208dd9ae99bf497273e16f389bdbd6c4742ddb8e6b216e64fa2928ad8f51ae4c00",
                     "",
                     "",
-                    "operation 1 of wrapped challenge script must be a PUSHDATA opcode, got 0x6a.",
+                    "operation 1 of wrapped challenge script must push data, got opcode 0x6a.",
             },
             {
                     "6a4c09011e0000000000000051",
                     "",
                     "",
-                    "operation 2 of wrapped challenge script must be a PUSHDATA opcode, got 0x51.",
+                    "operation 2 of wrapped challenge script must push data, got opcode 0x51.",
             },
     };
 

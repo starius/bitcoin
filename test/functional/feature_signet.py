@@ -49,7 +49,7 @@ class SignetBasicTest(BitcoinTestFramework):
             SignetParams(), # default challenge
             # default challenge as a 2-of-2, which means it should fail
             SignetParams(challenge='522103ad5e0edad18cb1f0fc0d28a3d4f1f3e445640337489abb10404f2d1e086be430210359ef5021964fe22d6f8e05b2463c9540ce96883fe3b278760f048f5189f2e6c452ae'),
-            SignetParams(challenge='6a4c09011e000000000000004c0151', internal_challenge='51'), # OP_TRUE, target_spacing=30
+            SignetParams(challenge='6a09011e000000000000000151', internal_challenge='51'), # OP_TRUE, target_spacing=30 (minimal pushes)
         ]
 
         self.extra_args = [
