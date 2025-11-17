@@ -69,6 +69,16 @@ To build dependencies for the current arch+OS:
 
     make
 
+### Nix
+
+If you are using Nix, the repository ships a flake that installs all build tools
+and libraries required for Bitcoin Core development. Enter the dev shell:
+
+    nix develop
+
+From inside the shell you can run `make` in `depends/` (or configure/build the
+project) without installing any additional packages on the host.
+
 ## Configuring Bitcoin Core
 
 **When configuring Bitcoin Core, CMake by default will ignore the depends output.** In
