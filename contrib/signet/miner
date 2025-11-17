@@ -481,9 +481,7 @@ def do_generate(args):
         if spacing_from_challenge is not None:
             logging.info("Using target spacing %d seconds from wrapped challenge", spacing_from_challenge)
 
-    if args.target_spacing is not None:
-        target_spacing = args.target_spacing
-    elif spacing_from_challenge is not None:
+    if spacing_from_challenge is not None:
         target_spacing = spacing_from_challenge
     else:
         target_spacing = DEFAULT_TARGET_SPACING
@@ -688,7 +686,6 @@ def main():
     generate.add_argument("--backup-delay", default=300, type=int, help="Seconds to delay before mining blocks reserved for other miners (default=300)")
     generate.add_argument("--standby-delay", default=0, type=int, help="Seconds to delay before mining blocks (default=0)")
     generate.add_argument("--max-interval", default=1800, type=int, help="Maximum interblock interval (seconds)")
-    generate.add_argument("--target-spacing", default=None, type=int, help="Target interval between blocks (seconds). Defaults to 600 unless provided by a wrapped challenge.")
     generate.add_argument("--challenge", default=None, type=str, help="Override the signet challenge hex. Wrapped challenges may include parameters like target spacing.")
 
     makechallenge = cmds.add_parser("makechallenge", help="Construct a (wrapped) signet challenge")
