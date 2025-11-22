@@ -10,21 +10,20 @@ import math
 import os
 import re
 import shlex
-import struct
 import subprocess
 import sys
 import time
+
+from io import BytesIO
 
 PATH_BASE_CONTRIB_SIGNET = os.path.abspath(os.path.dirname(os.path.realpath(__file__)))
 PATH_BASE_TEST_FUNCTIONAL = os.path.abspath(os.path.join(PATH_BASE_CONTRIB_SIGNET, "..", "..", "test", "functional"))
 sys.path.insert(0, PATH_BASE_TEST_FUNCTIONAL)
 
-from io import BytesIO
-
 from test_framework.blocktools import get_witness_script, script_BIP34_coinbase_height, SIGNET_HEADER # noqa: E402
 from test_framework.messages import CBlock, CBlockHeader, COutPoint, CTransaction, CTxIn, CTxInWitness, CTxOut, deser_compact_size, from_binary, from_hex, ser_compact_size, ser_string, ser_uint256, tx_from_hex, MAX_SEQUENCE_NONFINAL # noqa: E402
 from test_framework.psbt import PSBT, PSBTMap, PSBT_GLOBAL_UNSIGNED_TX, PSBT_IN_FINAL_SCRIPTSIG, PSBT_IN_FINAL_SCRIPTWITNESS, PSBT_IN_NON_WITNESS_UTXO, PSBT_IN_SIGHASH_TYPE # noqa: E402
-from test_framework.script import CScript, CScriptOp, CScriptInvalidError, OP_CHECKSIG, OP_RETURN, OP_TRUE # noqa: E402
+from test_framework.script import CScript, CScriptInvalidError, CScriptOp, OP_CHECKSIG, OP_RETURN, OP_TRUE # noqa: E402
 
 logging.basicConfig(
     format='%(asctime)s %(levelname)s %(message)s',
@@ -40,23 +39,28 @@ def encode_signet_params(target_spacing):
         return b""
     if target_spacing <= 0:
         raise ValueError("target spacing must be positive")
-    return ser_compact_size(0x01) + struct.pack("<q", target_spacing)
+    encoded = ser_compact_size(0x01)
+    encoded += ser_compact_size(target_spacing)
+    return encoded
 
 def decode_signet_params(params):
     if not params:
         return {}
     stream = BytesIO(params)
-    version = deser_compact_size(stream)
+    try:
+        version = deser_compact_size(stream)
+    except Exception as e:
+        raise ValueError(str(e))
     if version != 0x01:
         raise ValueError(f"Unknown signet params version 0x{version:02x}")
-    spacing_bytes = stream.read(8)
-    if len(spacing_bytes) < 8:
-        raise ValueError("signet params truncated")
-    spacing = struct.unpack("<q", spacing_bytes)[0]
+    try:
+        spacing = deser_compact_size(stream)
+    except Exception as e:
+        raise ValueError(str(e))
     if spacing <= 0:
-        raise ValueError("signet param pow_target_spacing <= 0")
+        raise ValueError("signet param pow_target_spacing <= 0.")
     if stream.read():
-        raise ValueError("signet params had unexpected trailing data")
+        raise ValueError("signet params had unexpected trailing data.")
     return {"target_spacing": spacing}
 
 def encode_push(data):

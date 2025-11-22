@@ -80,13 +80,19 @@ struct SignetParamsPayload {
 
     SERIALIZE_METHODS(SignetParamsPayload, obj)
     {
-        READWRITE(COMPACTSIZE(obj.version));
-        if (obj.version == CURRENT_VERSION) {
-            READWRITE(obj.pow_target_spacing);
-        } else if (ser_action.ForRead()) {
-            throw std::ios_base::failure(strprintf("Unknown signet params version %u, versions [0x01] supported.", obj.version));
-        } else {
-            throw std::ios_base::failure(strprintf("Attempted to write unknown signet params version %u.", obj.version));
+        uint64_t version = obj.version;
+        uint64_t spacing = obj.pow_target_spacing;
+        READWRITE(COMPACTSIZE(version));
+        READWRITE(COMPACTSIZE(spacing));
+        if (ser_action.ForRead()) {
+            if (version != CURRENT_VERSION) {
+                throw std::ios_base::failure(strprintf("Unknown signet params version %u, versions [0x01] supported.", version));
+            }
+            if (spacing > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
+                throw std::ios_base::failure("signet param pow_target_spacing out of range.");
+            }
+            obj.version = version;
+            obj.pow_target_spacing = spacing;
         }
     }
 };

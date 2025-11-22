@@ -120,15 +120,20 @@ OP_RETURN PUSHDATA<params> PUSHDATA<actual challenge>
 ```
 
 Nodes treat `<actual challenge>` as the enforcement script, and parse
-`<params>` as a serialized structure (little-endian) prefixed with a CompactSize
-version field. Unknown versions cause deserialization to fail, which prevents
-nodes that do not understand newer fields from joining such a network. Version
-`0x01` defines a single 8‑byte integer specifying the desired block target
-spacing in seconds. For example, a spacing of 30 seconds would encode as:
+`<params>` as a serialized structure consisting of a CompactSize version
+followed by a CompactSize-encoded block target spacing. Unknown versions cause
+deserialization to fail, which prevents nodes that do not understand newer
+fields from joining such a network. Version `0x01` defines the spacing field.
+For example, a spacing of 30 seconds encodes as:
 
 ```
-01 1e00000000000000
+01 1e
 ```
 
-You can use `makechallenge` subcommand to automate challenge creation, including
-wrapped challenges.
+You can use the `makechallenge` subcommand to automate challenge creation,
+including wrapped challenges, e.g.:
+
+```
+$MINER makechallenge --op-true --target-spacing=30
+6a02011e0151
+```

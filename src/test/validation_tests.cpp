@@ -78,7 +78,7 @@ BOOST_AUTO_TEST_CASE(signet_parse_tests)
     {
         // Wrapped challenge case.
         ArgsManager signet_argsman_custom_spacing;
-        signet_argsman_custom_spacing.ForceSetArg("-signetchallenge", "6a4c09011e000000000000004c0151"); // set challenge to OP_TRUE and spacing to 30 seconds
+        signet_argsman_custom_spacing.ForceSetArg("-signetchallenge", "6a02011e0151"); // set challenge to OP_TRUE and spacing to 30 seconds
         const auto signet_params_custom_spacing = CreateChainParams(signet_argsman_custom_spacing, ChainType::SIGNET);
         BOOST_CHECK(signet_params_custom_spacing->GetConsensus().signet_challenge == std::vector<uint8_t>{OP_TRUE});
         BOOST_CHECK(signet_params_custom_spacing->GetConsensus().nPowTargetSpacing == 30);
