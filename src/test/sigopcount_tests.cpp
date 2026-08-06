@@ -183,6 +183,17 @@ BOOST_AUTO_TEST_CASE(GetTxSigOpCost)
         assert(GetTransactionSigOpCost(CTransaction(spendingTx), coins, flags) == 0);
     }
 
+    // Flockroot witness-v2 key spend
+    {
+        CScript scriptPubKey = CScript() << OP_2 << std::vector<unsigned char>(32);
+        CScriptWitness scriptWitness;
+        scriptWitness.stack.emplace_back(64);
+
+        BuildTxs(spendingTx, coins, creationTx, scriptPubKey, CScript{}, scriptWitness);
+        assert(GetTransactionSigOpCost(CTransaction(spendingTx), coins, flags) == 1);
+        assert(GetTransactionSigOpCost(CTransaction(spendingTx), coins, flags & ~SCRIPT_VERIFY_WITNESS) == 0);
+    }
+
     // P2WPKH nested in P2SH
     {
         CScript scriptSig = GetScriptForDestination(WitnessV0KeyHash(pubkey));
