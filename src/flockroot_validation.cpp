@@ -134,7 +134,8 @@ bool CollectTransactionStatements(const CTransaction& tx,
     for (size_t input_index = 0; input_index < tx.vin.size(); ++input_index) {
         const Coin& coin{inputs.AccessCoin(tx.vin[input_index].prevout)};
         std::vector<unsigned char> program;
-        if (IsFlockrootOutput(coin.out.scriptPubKey, program)) {
+        if (IsFlockrootOutput(coin.out.scriptPubKey, program) &&
+            tx.vin[input_index].scriptWitness.stack.size() == 1) {
             flockroot_inputs.emplace_back(input_index, std::move(program));
         }
     }

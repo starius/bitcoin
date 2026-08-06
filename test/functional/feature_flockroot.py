@@ -25,9 +25,11 @@ from test_framework.messages import (
     CTxIn,
     CTxInWitness,
     CTxOut,
+    ser_string,
 )
 from test_framework.script import (
     CScript,
+    LEAF_VERSION_TAPSCRIPT,
     OP_2,
     OP_RETURN,
     OP_TRUE,
@@ -65,7 +67,8 @@ def derive_flockroot_key(internal_secret, public_key, pq_path=(), script_root=No
     tap_tweak = TaggedHash("TapTweak", hybrid_key + (script_root or b""))
     output_secret = tweak_add_privkey(hybrid_secret, tap_tweak)
     assert output_secret is not None
-    return internal_key, output_secret, compute_xonly_pubkey(output_secret)[0]
+    output_key, output_negated = compute_xonly_pubkey(output_secret)
+    return internal_key, hybrid_key, output_secret, output_key, output_negated
 
 
 def proof_outputs(proof):
@@ -131,16 +134,27 @@ class FlockrootTest(BitcoinTestFramework):
             bytes(range(48)), bytes([FXMSS_SHAPE_BALANCED, tree_depth])
         )
         internal_secret = (1).to_bytes(32, "big")
-        internal_key, output_secret, output_key = derive_flockroot_key(
+        internal_key, hybrid_key, output_secret, output_key, _ = derive_flockroot_key(
             internal_secret, shrincs_public
         )
         flockroot_script = CScript([OP_2, output_key])
         flockroot_address = encode_segwit_address("bcrt", 2, output_key)
 
-        funding = wallet.create_self_transfer_multi(num_outputs=spend_count, fee_per_output=2_000)
+        leaf_script = CScript([OP_TRUE])
+        script_root = TaggedHash(
+            "TapLeaf", bytes([LEAF_VERSION_TAPSCRIPT]) + ser_string(leaf_script)
+        )
+        _, script_hybrid_key, script_output_secret, script_output_key, script_output_negated = (
+            derive_flockroot_key(internal_secret, shrincs_public, script_root=script_root)
+        )
+        flockroot_script_tree = CScript([OP_2, script_output_key])
+        flockroot_script_address = encode_segwit_address("bcrt", 2, script_output_key)
+
+        funding = wallet.create_self_transfer_multi(num_outputs=spend_count + 1, fee_per_output=2_000)
         funding_tx = funding["tx"]
-        for output in funding_tx.vout:
+        for output in funding_tx.vout[:spend_count]:
             output.scriptPubKey = flockroot_script
+        funding_tx.vout[spend_count].scriptPubKey = flockroot_script_tree
         funding_txid = node0.sendrawtransaction(funding_tx.serialize().hex())
         assert_equal(funding_txid, funding_tx.txid_hex)
         self.generate(wallet, 1)
@@ -176,6 +190,19 @@ class FlockrootTest(BitcoinTestFramework):
                 "signature": {"bytes": shrincs_signature.hex()},
             })
 
+        script_tx = CTransaction()
+        script_tx.vin = [CTxIn(COutPoint(funding_tx.txid_int, spend_count))]
+        script_tx.vout = [CTxOut(
+            funding_tx.vout[spend_count].nValue - fee_per_spend,
+            CScript([OP_TRUE]),
+        )]
+        script_tx.wit.vtxinwit = [CTxInWitness()]
+        script_tx.wit.vtxinwit[0].scriptWitness.stack = [
+            bytes(leaf_script),
+            bytes([LEAF_VERSION_TAPSCRIPT | script_output_negated]) + script_hybrid_key,
+        ]
+        transactions.append(script_tx)
+
         authorizations_path = artifact_dir / "authorizations.json"
         proof_path = artifact_dir / "flockroot-proof.bin"
         authorizations_path.write_text(json.dumps(authorizations, indent=2) + "\n")
@@ -197,19 +224,19 @@ class FlockrootTest(BitcoinTestFramework):
         self.disconnect_nodes(0, 1)
 
         missing_block, _ = self.make_block(
-            transactions, spend_count * fee_per_spend, proof=None
+            transactions, (spend_count + 1) * fee_per_spend, proof=None
         )
         assert_equal(node0.submitblock(missing_block.serialize().hex()), "bad-flockroot-proof")
 
         tampered = bytearray(proof)
         tampered[len(tampered) // 2] ^= 1
         tampered_block, _ = self.make_block(
-            transactions, spend_count * fee_per_spend, proof=bytes(tampered)
+            transactions, (spend_count + 1) * fee_per_spend, proof=bytes(tampered)
         )
         assert_equal(node0.submitblock(tampered_block.serialize().hex()), "bad-flockroot-proof")
 
         block, solve_seconds = self.make_block(
-            transactions, spend_count * fee_per_spend, proof=proof, fill=True
+            transactions, (spend_count + 1) * fee_per_spend, proof=proof, fill=True
         )
         validation_start = time.perf_counter()
         assert_equal(node0.submitblock(block.serialize().hex()), None)
@@ -229,14 +256,22 @@ class FlockrootTest(BitcoinTestFramework):
             "ec_internal_key": internal_key.hex(),
             "ec_output_secret": output_secret.hex(),
             "ec_output_key": output_key.hex(),
+            "ec_hybrid_key": hybrid_key.hex(),
+            "script_path_output_secret": script_output_secret.hex(),
+            "script_path_output_key": script_output_key.hex(),
+            "script_path_hybrid_key": script_hybrid_key.hex(),
             "shrincs_secret": shrincs_secret.hex(),
             "shrincs_public": shrincs_public.hex(),
             "script_pubkey": flockroot_script.hex(),
             "address": flockroot_address,
+            "script_path_address": flockroot_script_address,
+            "script_path_script_pubkey": flockroot_script_tree.hex(),
         }, indent=2) + "\n")
         metrics = {
             "name": "Flockroot",
-            "spends": spend_count,
+            "key_path_spends": spend_count,
+            "script_path_spends": 1,
+            "total_flockroot_spends": spend_count + 1,
             "proof_bytes": len(proof),
             "block_bytes": len(block.serialize()),
             "block_weight": block.get_weight(),
