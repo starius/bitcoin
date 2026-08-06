@@ -19,6 +19,7 @@
 #include <consensus/validation.h>
 #include <cuckoocache.h>
 #include <flatfile.h>
+#include <flockroot_validation.h>
 #include <hash.h>
 #include <kernel/chainparams.h>
 #include <kernel/coinstats.h>
@@ -2529,6 +2530,7 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
     CAmount nFees = 0;
     int nInputs = 0;
     int64_t nSigOpsCost = 0;
+    std::vector<flockroot::Statement> flockroot_statements;
     blockundo.vtxundo.reserve(block.vtx.size() - 1);
     for (unsigned int i = 0; i < block.vtx.size(); i++)
     {
@@ -2566,6 +2568,12 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
             if (!SequenceLocks(tx, nLockTimeFlags, prevheights, *pindex)) {
                 state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-txns-nonfinal",
                               "contains a non-BIP68-final transaction " + tx.GetHash().ToString());
+                break;
+            }
+
+            std::string flockroot_error;
+            if (!flockroot::CollectTransactionStatements(tx, view, txsdata[i], flockroot_statements, flockroot_error)) {
+                state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-flockroot-spend", flockroot_error);
                 break;
             }
         }
@@ -2626,6 +2634,16 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
         if (parallel_result.has_value() && state.IsValid()) {
             state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, strprintf("block-script-verify-flag-failed (%s)", ScriptErrorString(parallel_result->first)), parallel_result->second);
         }
+    }
+    if (state.IsValid()) {
+        const auto flockroot_start{SteadyClock::now()};
+        std::string flockroot_error;
+        if (!flockroot::VerifyBlockProof(block, flockroot_statements, flockroot_error)) {
+            state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-flockroot-proof", flockroot_error);
+        }
+        LogDebug(BCLog::BENCH, "    - Verify Flockroot proof (%u statements): %.2fms\n",
+                 flockroot_statements.size(),
+                 Ticks<MillisecondsDouble>(SteadyClock::now() - flockroot_start));
     }
     if (!state.IsValid()) {
         LogInfo("Block validation error: %s", state.ToString());

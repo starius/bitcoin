@@ -180,6 +180,17 @@ if(ENABLE_WALLET)
 endif()
 
 
+# Prototype Flockroot verifier built by /home/user/shrincs-bip/flock.
+set(FLOCKROOT_ROOT "" CACHE PATH "Path to the packaged Flockroot SHRINCS verifier")
+if(NOT FLOCKROOT_ROOT)
+  message(FATAL_ERROR "FLOCKROOT_ROOT must point to a Flockroot verifier package")
+endif()
+add_library(flockroot_shrincs STATIC IMPORTED GLOBAL)
+set_target_properties(flockroot_shrincs PROPERTIES
+  IMPORTED_LOCATION "${FLOCKROOT_ROOT}/lib/libflockroot_shrincs.a"
+  INTERFACE_INCLUDE_DIRECTORIES "${FLOCKROOT_ROOT}/include"
+)
+
 # P2P and RPC server functionality used by `bitcoind` and `bitcoin-qt` executables.
 add_library(bitcoin_node STATIC EXCLUDE_FROM_ALL
   addrdb.cpp
@@ -192,6 +203,7 @@ add_library(bitcoin_node STATIC EXCLUDE_FROM_ALL
   dbwrapper.cpp
   deploymentstatus.cpp
   flatfile.cpp
+  flockroot_validation.cpp
   headerssync.cpp
   httprpc.cpp
   httpserver.cpp
@@ -288,6 +300,8 @@ target_link_libraries(bitcoin_node
     $<TARGET_NAME_IF_EXISTS:bitcoin_zmq>
     leveldb
     minisketch
+    flockroot_shrincs
+    ${CMAKE_DL_LIBS}
     univalue
     $<TARGET_NAME_IF_EXISTS:Boost::headers>
     $<TARGET_NAME_IF_EXISTS:USDT::headers>

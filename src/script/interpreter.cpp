@@ -1426,8 +1426,8 @@ void PrecomputedTransactionData::Init(const T& txTo, std::vector<CTxOut>&& spent
     for (size_t inpos = 0; inpos < txTo.vin.size() && !(uses_bip143_segwit && uses_bip341_taproot); ++inpos) {
         if (!txTo.vin[inpos].scriptWitness.IsNull()) {
             if (m_spent_outputs_ready && m_spent_outputs[inpos].scriptPubKey.size() == 2 + WITNESS_V1_TAPROOT_SIZE &&
-                m_spent_outputs[inpos].scriptPubKey[0] == OP_1) {
-                // Treat every witness-bearing spend with 34-byte scriptPubKey that starts with OP_1 as a Taproot
+                (m_spent_outputs[inpos].scriptPubKey[0] == OP_1 || m_spent_outputs[inpos].scriptPubKey[0] == OP_2)) {
+                // Treat every witness-bearing spend with 34-byte scriptPubKey that starts with OP_1 or OP_2 as a Taproot-style
                 // spend. This only works if spent_outputs was provided as well, but if it wasn't, actual validation
                 // will fail anyway. Note that this branch may trigger for scriptPubKeys that aren't actually segwit
                 // but in that case validation will fail as SCRIPT_ERR_WITNESS_UNEXPECTED anyway.
@@ -1997,6 +1997,16 @@ static bool VerifyWitnessProgram(const CScriptWitness& witness, int witversion, 
             }
             return set_success(serror);
         }
+    } else if (witversion == 2 && program.size() == WITNESS_V2_FLOCKROOT_SIZE && !is_p2sh) {
+        // Flockroot key spend. Its companion SHRINCS authorization is checked once per block.
+        if (!(flags & SCRIPT_VERIFY_TAPROOT)) return set_success(serror);
+        if (stack.size() != 1) return set_error(serror, SCRIPT_ERR_WITNESS_PROGRAM_MISMATCH);
+        execdata.m_annex_present = false;
+        execdata.m_annex_init = true;
+        if (!checker.CheckSchnorrSignature(stack.front(), program, SigVersion::TAPROOT, execdata, serror)) {
+            return false;
+        }
+        return set_success(serror);
     } else if (!is_p2sh && CScript::IsPayToAnchor(witversion, program)) {
         return true;
     } else {
@@ -2141,6 +2151,8 @@ size_t static WitnessSigOps(int witversion, const std::vector<unsigned char>& wi
             return subscript.GetSigOpCount(true);
         }
     }
+
+    if (witversion == 2 && witprogram.size() == WITNESS_V2_FLOCKROOT_SIZE) return 1;
 
     // Future flags may be implemented here.
     return 0;
