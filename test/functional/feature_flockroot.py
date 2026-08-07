@@ -54,19 +54,30 @@ def pq_root(public_key, path=()):
     return root
 
 
+def taproot_tree_root(pq_tree_root, script_root=None):
+    if script_root is None:
+        return pq_tree_root
+    return TaggedHash("TapBranch", b"".join(sorted([pq_tree_root, script_root])))
+
+
 def derive_flockroot_key(internal_secret, public_key, pq_path=(), script_root=None):
     internal_key = compute_xonly_pubkey(internal_secret)[0]
-    hybrid_tweak = TaggedHash(
-        "Flockroot/HybridTweak", internal_key + pq_root(public_key, pq_path)
-    )
-    hybrid_secret = tweak_add_privkey(internal_secret, hybrid_tweak)
-    assert hybrid_secret is not None
-    hybrid_key = compute_xonly_pubkey(hybrid_secret)[0]
-    tap_tweak = TaggedHash("TapTweak", hybrid_key + (script_root or b""))
-    output_secret = tweak_add_privkey(hybrid_secret, tap_tweak)
+    tree_root = taproot_tree_root(pq_root(public_key, pq_path), script_root)
+    tap_tweak = TaggedHash("TapTweak", internal_key + tree_root)
+    output_secret = tweak_add_privkey(internal_secret, tap_tweak)
     assert output_secret is not None
     output_key, output_negated = compute_xonly_pubkey(output_secret)
-    return internal_key, hybrid_key, output_secret, output_key, output_negated
+    return internal_key, tap_tweak, output_secret, output_key, output_negated
+
+
+def find_even_flockroot_key(first_secret, public_key, pq_path=(), script_root=None):
+    candidate = first_secret
+    while True:
+        secret = candidate.to_bytes(32, "big")
+        derived = derive_flockroot_key(secret, public_key, pq_path, script_root)
+        if not derived[-1]:
+            return secret, derived
+        candidate += 1
 
 
 class FlockrootTest(BitcoinTestFramework):
@@ -128,15 +139,18 @@ class FlockrootTest(BitcoinTestFramework):
             bytes(range(48)), bytes([FXMSS_SHAPE_BALANCED, tree_depth])
         )
         key_records = []
+        next_internal_secret = 1
         for index in range(spend_count):
-            internal_secret = (index + 1).to_bytes(32, "big")
-            internal_key, hybrid_key, output_secret, output_key, _ = derive_flockroot_key(
-                internal_secret, shrincs_public
+            internal_secret, derived = find_even_flockroot_key(
+                next_internal_secret, shrincs_public
             )
+            internal_key, tap_tweak, output_secret, output_key, output_negated = derived
+            assert not output_negated
+            next_internal_secret = int.from_bytes(internal_secret, "big") + 1
             key_records.append({
                 "internal_secret": internal_secret,
                 "internal_key": internal_key,
-                "hybrid_key": hybrid_key,
+                "tap_tweak": tap_tweak,
                 "output_secret": output_secret,
                 "output_key": output_key,
                 "script_pubkey": CScript([OP_2, output_key]),
@@ -148,10 +162,17 @@ class FlockrootTest(BitcoinTestFramework):
         script_root = TaggedHash(
             "TapLeaf", bytes([LEAF_VERSION_TAPSCRIPT]) + ser_string(leaf_script)
         )
-        script_internal_secret = (spend_count + 1).to_bytes(32, "big")
-        script_internal_key, script_hybrid_key, script_output_secret, script_output_key, script_output_negated = (
-            derive_flockroot_key(script_internal_secret, shrincs_public, script_root=script_root)
+        script_internal_secret, script_derived = find_even_flockroot_key(
+            next_internal_secret, shrincs_public, script_root=script_root
         )
+        (
+            script_internal_key,
+            script_tap_tweak,
+            script_output_secret,
+            script_output_key,
+            script_output_negated,
+        ) = script_derived
+        assert not script_output_negated
         flockroot_script_tree = CScript([OP_2, script_output_key])
         flockroot_script_address = encode_segwit_address("bcrt", 2, script_output_key)
 
@@ -176,6 +197,7 @@ class FlockrootTest(BitcoinTestFramework):
                 tx, [funding_tx.vout[index]], SIGHASH_DEFAULT, input_index=0
             )
             signature = sign_schnorr(key_record["output_secret"], sighash)
+            assert_equal(len(signature), 64)
             tx.wit.vtxinwit = [CTxInWitness()]
             tx.wit.vtxinwit[0].scriptWitness.stack = [signature]
             transactions.append(tx)
@@ -205,8 +227,14 @@ class FlockrootTest(BitcoinTestFramework):
         script_tx.wit.vtxinwit = [CTxInWitness()]
         script_tx.wit.vtxinwit[0].scriptWitness.stack = [
             bytes(leaf_script),
-            bytes([LEAF_VERSION_TAPSCRIPT | script_output_negated]) + script_hybrid_key,
+            bytes([LEAF_VERSION_TAPSCRIPT | script_output_negated])
+            + script_internal_key
+            + pq_root(shrincs_public),
         ]
+        assert_equal(
+            [len(element) for element in script_tx.wit.vtxinwit[0].scriptWitness.stack],
+            [1, 65],
+        )
         transactions.append(script_tx)
 
         authorizations_path = artifact_dir / "authorizations.json"
@@ -276,7 +304,7 @@ class FlockrootTest(BitcoinTestFramework):
                 "ec_internal_key": record["internal_key"].hex(),
                 "ec_output_secret": record["output_secret"].hex(),
                 "ec_output_key": record["output_key"].hex(),
-                "ec_hybrid_key": record["hybrid_key"].hex(),
+                "tap_tweak": record["tap_tweak"].hex(),
                 "script_pubkey": record["script_pubkey"].hex(),
                 "address": record["address"],
             } for record in key_records],
@@ -284,7 +312,7 @@ class FlockrootTest(BitcoinTestFramework):
             "script_path_internal_key": script_internal_key.hex(),
             "script_path_output_secret": script_output_secret.hex(),
             "script_path_output_key": script_output_key.hex(),
-            "script_path_hybrid_key": script_hybrid_key.hex(),
+            "script_path_tap_tweak": script_tap_tweak.hex(),
             "shrincs_secret": shrincs_secret.hex(),
             "shrincs_public": shrincs_public.hex(),
             "script_pubkey": key_records[0]["script_pubkey"].hex(),
