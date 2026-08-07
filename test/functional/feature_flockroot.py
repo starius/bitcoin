@@ -42,7 +42,7 @@ from test_framework.wallet import MiniWallet
 
 
 PROOF_MAGIC = b"FLOCKRT\x00"
-PROOF_VERSION = 0
+PROOF_VERSION = 1
 TARGET_BLOCK_WEIGHT = 3_950_000
 FILLER_CHUNK_SIZE = 8_000
 
@@ -279,7 +279,7 @@ class FlockrootTest(BitcoinTestFramework):
             duplicate_block, _ = self.make_block(
                 transactions,
                 (spend_count + 1) * fee_per_spend,
-                proof=proof,
+                proof=proof[:1],
                 duplicate_proof=True,
             )
             assert_equal(node0.submitblock(duplicate_block.serialize().hex()), "bad-flockroot-proof")
