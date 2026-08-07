@@ -188,6 +188,7 @@ class FlockrootTest(BitcoinTestFramework):
         transactions = []
         authorizations = []
         fee_per_spend = 1_000
+        stateless_spends = 1
         for index in range(spend_count):
             key_record = key_records[index]
             tx = CTransaction()
@@ -202,7 +203,8 @@ class FlockrootTest(BitcoinTestFramework):
             tx.wit.vtxinwit[0].scriptWitness.stack = [signature]
             transactions.append(tx)
 
-            shrincs_signature = shrincs_sign(sighash, shrincs_secret, index, None)
+            state_counter = None if index >= spend_count - stateless_spends else index
+            shrincs_signature = shrincs_sign(sighash, shrincs_secret, state_counter, None)
             assert shrincs_signature is not None
             authorizations.append({
                 "output_key": key_record["output_key"].hex(),
@@ -323,6 +325,8 @@ class FlockrootTest(BitcoinTestFramework):
         metrics = {
             "name": "Flockroot",
             "key_path_spends": spend_count,
+            "stateful_pq_spends": spend_count - stateless_spends,
+            "stateless_pq_spends": stateless_spends,
             "script_path_spends": 1,
             "total_flockroot_spends": spend_count + 1,
             "proof_bytes": len(proof),
