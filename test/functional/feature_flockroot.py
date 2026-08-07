@@ -3,7 +3,6 @@
 
 import json
 from pathlib import Path
-import struct
 import subprocess
 import sys
 import time
@@ -44,7 +43,6 @@ from test_framework.wallet import MiniWallet
 
 PROOF_MAGIC = b"FLOCKRT\x00"
 PROOF_VERSION = 0
-PROOF_CHUNK_SIZE = 8_000
 TARGET_BLOCK_WEIGHT = 3_950_000
 FILLER_CHUNK_SIZE = 8_000
 
@@ -71,18 +69,6 @@ def derive_flockroot_key(internal_secret, public_key, pq_path=(), script_root=No
     return internal_key, hybrid_key, output_secret, output_key, output_negated
 
 
-def proof_outputs(proof):
-    count = (len(proof) + PROOF_CHUNK_SIZE - 1) // PROOF_CHUNK_SIZE
-    outputs = []
-    for index in range(count):
-        chunk = proof[index * PROOF_CHUNK_SIZE:(index + 1) * PROOF_CHUNK_SIZE]
-        header = PROOF_MAGIC + bytes([PROOF_VERSION]) + struct.pack(
-            "<III", index, count, len(proof)
-        )
-        outputs.append(CTxOut(0, CScript([OP_RETURN, header + chunk])))
-    return outputs
-
-
 class FlockrootTest(BitcoinTestFramework):
     def set_test_params(self):
         self.num_nodes = 2
@@ -93,14 +79,24 @@ class FlockrootTest(BitcoinTestFramework):
         parser.add_argument("--artifact-dir", required=True)
         parser.add_argument("--flockroot-spends", default=16, type=int)
 
-    def make_block(self, transactions, fees, proof=None, fill=False):
+    def make_block(self, transactions, fees, proof=None, duplicate_proof=False, fill=False):
         node = self.nodes[0]
         height = node.getblockcount() + 1
         tip = int(node.getbestblockhash(), 16)
         block_time = node.getblock(node.getbestblockhash())["time"] + 1
         coinbase = create_coinbase(height, fees=fees)
+        for tx in transactions:
+            witness = tx.wit.vtxinwit[0].scriptWitness
+            if witness.stack and len(witness.stack[0]) in (64, 65):
+                witness.stack = [witness.stack[0]]
+
+        carrier_witness = transactions[0].wit.vtxinwit[0].scriptWitness
+        carrier_witness.stack = [carrier_witness.stack[0]]
         if proof is not None:
-            coinbase.vout.extend(proof_outputs(proof))
+            carrier = PROOF_MAGIC + bytes([PROOF_VERSION]) + proof
+            carrier_witness.stack.append(carrier)
+            if duplicate_proof:
+                transactions[1].wit.vtxinwit[0].scriptWitness.stack.append(carrier)
 
         block = create_block(tip, coinbase, ntime=block_time, txlist=transactions)
         if fill:
@@ -221,6 +217,10 @@ class FlockrootTest(BitcoinTestFramework):
         prove_seconds = time.perf_counter() - prove_start
         proof = proof_path.read_bytes()
 
+        workload_block, workload_solve_seconds = self.make_block(
+            transactions, (spend_count + 1) * fee_per_spend, proof=proof
+        )
+
         self.disconnect_nodes(0, 1)
 
         missing_block, _ = self.make_block(
@@ -234,6 +234,15 @@ class FlockrootTest(BitcoinTestFramework):
             transactions, (spend_count + 1) * fee_per_spend, proof=bytes(tampered)
         )
         assert_equal(node0.submitblock(tampered_block.serialize().hex()), "bad-flockroot-proof")
+
+        if spend_count > 1:
+            duplicate_block, _ = self.make_block(
+                transactions,
+                (spend_count + 1) * fee_per_spend,
+                proof=proof,
+                duplicate_proof=True,
+            )
+            assert_equal(node0.submitblock(duplicate_block.serialize().hex()), "bad-flockroot-spend")
 
         block, solve_seconds = self.make_block(
             transactions, (spend_count + 1) * fee_per_spend, proof=proof, fill=True
@@ -273,6 +282,10 @@ class FlockrootTest(BitcoinTestFramework):
             "script_path_spends": 1,
             "total_flockroot_spends": spend_count + 1,
             "proof_bytes": len(proof),
+            "proof_carrier_bytes": len(PROOF_MAGIC) + 1 + len(proof),
+            "workload_block_bytes": len(workload_block.serialize()),
+            "workload_block_weight": workload_block.get_weight(),
+            "workload_solve_seconds": workload_solve_seconds,
             "block_bytes": len(block.serialize()),
             "block_weight": block.get_weight(),
             "prove_seconds": prove_seconds,

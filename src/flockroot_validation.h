@@ -11,7 +11,6 @@
 #include <string>
 #include <vector>
 
-class CBlock;
 class CCoinsViewCache;
 class CTransaction;
 struct PrecomputedTransactionData;
@@ -30,10 +29,13 @@ bool CollectTransactionStatements(const CTransaction& tx,
                                   const CCoinsViewCache& inputs,
                                   PrecomputedTransactionData& txdata,
                                   std::vector<Statement>& statements,
+                                  std::vector<unsigned char>& proof,
+                                  bool& proof_found,
                                   std::string& error);
 
-bool VerifyBlockProof(const CBlock& block,
-                      const std::vector<Statement>& statements,
+bool VerifyBlockProof(const std::vector<Statement>& statements,
+                      const std::vector<unsigned char>& proof,
+                      bool proof_found,
                       std::string& error);
 
 } // namespace flockroot

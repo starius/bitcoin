@@ -2531,6 +2531,8 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
     int nInputs = 0;
     int64_t nSigOpsCost = 0;
     std::vector<flockroot::Statement> flockroot_statements;
+    std::vector<unsigned char> flockroot_proof;
+    bool flockroot_proof_found{false};
     blockundo.vtxundo.reserve(block.vtx.size() - 1);
     for (unsigned int i = 0; i < block.vtx.size(); i++)
     {
@@ -2572,7 +2574,9 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
             }
 
             std::string flockroot_error;
-            if (!flockroot::CollectTransactionStatements(tx, view, txsdata[i], flockroot_statements, flockroot_error)) {
+            if (!flockroot::CollectTransactionStatements(tx, view, txsdata[i], flockroot_statements,
+                                                         flockroot_proof, flockroot_proof_found,
+                                                         flockroot_error)) {
                 state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-flockroot-spend", flockroot_error);
                 break;
             }
@@ -2638,7 +2642,8 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
     if (state.IsValid()) {
         const auto flockroot_start{SteadyClock::now()};
         std::string flockroot_error;
-        if (!flockroot::VerifyBlockProof(block, flockroot_statements, flockroot_error)) {
+        if (!flockroot::VerifyBlockProof(flockroot_statements, flockroot_proof,
+                                         flockroot_proof_found, flockroot_error)) {
             state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-flockroot-proof", flockroot_error);
         }
         LogDebug(BCLog::BENCH, "    - Verify Flockroot proof (%u statements): %.2fms\n",

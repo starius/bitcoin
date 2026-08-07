@@ -5,8 +5,8 @@
 #include <flockroot_validation.h>
 
 #include <coins.h>
+#include <consensus/flockroot.h>
 #include <flockroot.h>
-#include <primitives/block.h>
 #include <primitives/transaction.h>
 #include <script/interpreter.h>
 #include <script/script.h>
@@ -15,7 +15,6 @@
 #include <array>
 #include <cstdint>
 #include <limits>
-#include <optional>
 #include <span>
 #include <string>
 #include <vector>
@@ -23,19 +22,7 @@
 namespace flockroot {
 namespace {
 
-static constexpr std::array<unsigned char, 8> PROOF_MAGIC{'F', 'L', 'O', 'C', 'K', 'R', 'T', 0};
-static constexpr unsigned char PROOF_VERSION{0};
-static constexpr size_t PROOF_HEADER_SIZE{PROOF_MAGIC.size() + 1 + 4 + 4 + 4};
-static constexpr uint32_t MAX_PROOF_CHUNKS{1024};
 static constexpr uint32_t MAX_PROOF_SIZE{4'000'000};
-
-uint32_t ReadLE32(std::span<const unsigned char> bytes)
-{
-    return uint32_t{bytes[0]} |
-           (uint32_t{bytes[1]} << 8) |
-           (uint32_t{bytes[2]} << 16) |
-           (uint32_t{bytes[3]} << 24);
-}
 
 void WriteLE32(std::vector<unsigned char>& out, uint32_t value)
 {
@@ -52,73 +39,31 @@ bool IsFlockrootOutput(const CScript& script, std::vector<unsigned char>& progra
            version == WITNESS_VERSION && program.size() == WITNESS_PROGRAM_SIZE;
 }
 
-bool ExtractProof(const CTransaction& coinbase,
+bool ExtractProof(const CScriptWitness& witness,
                   std::vector<unsigned char>& proof,
-                  bool& found,
+                  bool& proof_found,
                   std::string& error)
 {
-    found = false;
-    std::optional<uint32_t> chunk_count;
-    std::optional<uint32_t> total_size;
-    std::vector<std::optional<std::vector<unsigned char>>> chunks;
-
-    for (const CTxOut& output : coinbase.vout) {
-        const CScript& script{output.scriptPubKey};
-        CScript::const_iterator pc{script.begin()};
-        opcodetype opcode;
-        std::vector<unsigned char> data;
-        if (!script.GetOp(pc, opcode) || opcode != OP_RETURN) continue;
-        if (!script.GetOp(pc, opcode, data) || opcode > OP_PUSHDATA4 || pc != script.end()) continue;
-        if (data.size() < PROOF_MAGIC.size() ||
-            !std::equal(PROOF_MAGIC.begin(), PROOF_MAGIC.end(), data.begin())) {
-            continue;
-        }
-        found = true;
-        if (data.size() < PROOF_HEADER_SIZE) {
-            error = "truncated Flockroot proof chunk";
-            return false;
-        }
-        if (data[PROOF_MAGIC.size()] != PROOF_VERSION) {
-            error = "unsupported Flockroot proof carrier version";
-            return false;
-        }
-        const size_t fields{PROOF_MAGIC.size() + 1};
-        const uint32_t index{ReadLE32(std::span{data}.subspan(fields, 4))};
-        const uint32_t count{ReadLE32(std::span{data}.subspan(fields + 4, 4))};
-        const uint32_t size{ReadLE32(std::span{data}.subspan(fields + 8, 4))};
-        if (count == 0 || count > MAX_PROOF_CHUNKS || index >= count || size > MAX_PROOF_SIZE) {
-            error = "invalid Flockroot proof chunk metadata";
-            return false;
-        }
-        if (!chunk_count) {
-            chunk_count = count;
-            total_size = size;
-            chunks.resize(count);
-        } else if (*chunk_count != count || *total_size != size) {
-            error = "inconsistent Flockroot proof chunk metadata";
-            return false;
-        }
-        if (chunks[index]) {
-            error = "duplicate Flockroot proof chunk";
-            return false;
-        }
-        chunks[index] = std::vector<unsigned char>(data.begin() + PROOF_HEADER_SIZE, data.end());
-    }
-
-    if (!found) return true;
-    proof.clear();
-    proof.reserve(*total_size);
-    for (const auto& chunk : chunks) {
-        if (!chunk) {
-            error = "missing Flockroot proof chunk";
-            return false;
-        }
-        proof.insert(proof.end(), chunk->begin(), chunk->end());
-    }
-    if (proof.size() != *total_size) {
-        error = "Flockroot proof size mismatch";
+    if (witness.stack.size() != 2 || !HasProofMagic(witness.stack[1])) return true;
+    const auto& carrier{witness.stack[1]};
+    if (proof_found) {
+        error = "multiple Flockroot proof carriers";
         return false;
     }
+    if (carrier.size() < PROOF_HEADER_SIZE) {
+        error = "truncated Flockroot proof carrier";
+        return false;
+    }
+    if (carrier[PROOF_MAGIC.size()] != PROOF_VERSION) {
+        error = "unsupported Flockroot proof carrier version";
+        return false;
+    }
+    if (carrier.size() - PROOF_HEADER_SIZE > MAX_PROOF_SIZE) {
+        error = "Flockroot proof exceeds size limit";
+        return false;
+    }
+    proof.assign(carrier.begin() + PROOF_HEADER_SIZE, carrier.end());
+    proof_found = true;
     return true;
 }
 
@@ -128,14 +73,18 @@ bool CollectTransactionStatements(const CTransaction& tx,
                                   const CCoinsViewCache& inputs,
                                   PrecomputedTransactionData& txdata,
                                   std::vector<Statement>& statements,
+                                  std::vector<unsigned char>& proof,
+                                  bool& proof_found,
                                   std::string& error)
 {
     std::vector<std::pair<size_t, std::vector<unsigned char>>> flockroot_inputs;
     for (size_t input_index = 0; input_index < tx.vin.size(); ++input_index) {
         const Coin& coin{inputs.AccessCoin(tx.vin[input_index].prevout)};
         std::vector<unsigned char> program;
-        if (IsFlockrootOutput(coin.out.scriptPubKey, program) &&
-            tx.vin[input_index].scriptWitness.stack.size() == 1) {
+        if (!IsFlockrootOutput(coin.out.scriptPubKey, program)) continue;
+        const CScriptWitness& witness{tx.vin[input_index].scriptWitness};
+        if (!ExtractProof(witness, proof, proof_found, error)) return false;
+        if (witness.stack.size() == 1 || IsProofCarrier(witness)) {
             flockroot_inputs.emplace_back(input_index, std::move(program));
         }
     }
@@ -152,9 +101,9 @@ bool CollectTransactionStatements(const CTransaction& tx,
 
     for (const auto& [input_index, program] : flockroot_inputs) {
         const CScriptWitness& witness{tx.vin[input_index].scriptWitness};
-        if (witness.stack.size() != 1 ||
+        if ((witness.stack.size() != 1 && !IsProofCarrier(witness)) ||
             (witness.stack[0].size() != 64 && witness.stack[0].size() != 65)) {
-            error = "Flockroot key spend requires one 64- or 65-byte Schnorr signature";
+            error = "invalid Flockroot key-spend witness";
             return false;
         }
         uint8_t hash_type{SIGHASH_DEFAULT};
@@ -181,18 +130,16 @@ bool CollectTransactionStatements(const CTransaction& tx,
     return true;
 }
 
-bool VerifyBlockProof(const CBlock& block,
-                      const std::vector<Statement>& statements,
+bool VerifyBlockProof(const std::vector<Statement>& statements,
+                      const std::vector<unsigned char>& proof,
+                      bool proof_found,
                       std::string& error)
 {
-    std::vector<unsigned char> proof;
-    bool found{false};
-    if (!ExtractProof(*block.vtx[0], proof, found, error)) return false;
     if (statements.empty()) {
-        if (found) error = "Flockroot proof present without Flockroot spends";
-        return !found;
+        if (proof_found) error = "Flockroot proof present without Flockroot spends";
+        return !proof_found;
     }
-    if (!found) {
+    if (!proof_found) {
         error = "missing Flockroot block proof";
         return false;
     }
