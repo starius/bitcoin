@@ -90,13 +90,11 @@ class FlockrootTest(BitcoinTestFramework):
             if witness.stack and len(witness.stack[0]) in (64, 65):
                 witness.stack = [witness.stack[0]]
 
-        carrier_witness = transactions[0].wit.vtxinwit[0].scriptWitness
-        carrier_witness.stack = [carrier_witness.stack[0]]
         if proof is not None:
             carrier = PROOF_MAGIC + bytes([PROOF_VERSION]) + proof
-            carrier_witness.stack.append(carrier)
+            coinbase.vout.append(CTxOut(0, CScript([OP_RETURN, carrier])))
             if duplicate_proof:
-                transactions[1].wit.vtxinwit[0].scriptWitness.stack.append(carrier)
+                coinbase.vout.append(CTxOut(0, CScript([OP_RETURN, carrier])))
 
         block = create_block(tip, coinbase, ntime=block_time, txlist=transactions)
         if fill:
@@ -254,7 +252,7 @@ class FlockrootTest(BitcoinTestFramework):
                 proof=proof,
                 duplicate_proof=True,
             )
-            assert_equal(node0.submitblock(duplicate_block.serialize().hex()), "bad-flockroot-spend")
+            assert_equal(node0.submitblock(duplicate_block.serialize().hex()), "bad-flockroot-proof")
 
         block, solve_seconds = self.make_block(
             transactions, (spend_count + 1) * fee_per_spend, proof=proof, fill=True
@@ -300,7 +298,7 @@ class FlockrootTest(BitcoinTestFramework):
             "script_path_spends": 1,
             "total_flockroot_spends": spend_count + 1,
             "proof_bytes": len(proof),
-            "proof_carrier_bytes": len(PROOF_MAGIC) + 1 + len(proof),
+            "proof_coinbase_payload_bytes": len(PROOF_MAGIC) + 1 + len(proof),
             "workload_block_bytes": len(workload_block.serialize()),
             "workload_block_weight": workload_block.get_weight(),
             "workload_solve_seconds": workload_solve_seconds,

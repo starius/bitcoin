@@ -39,15 +39,13 @@ bool IsFlockrootOutput(const CScript& script, std::vector<unsigned char>& progra
            version == WITNESS_VERSION && program.size() == WITNESS_PROGRAM_SIZE;
 }
 
-bool ExtractProof(const CScriptWitness& witness,
-                  std::vector<unsigned char>& proof,
-                  bool& proof_found,
-                  std::string& error)
+bool ExtractCarrier(const std::vector<unsigned char>& carrier,
+                    std::vector<unsigned char>& proof,
+                    bool& proof_found,
+                    std::string& error)
 {
-    if (witness.stack.size() != 2 || !HasProofMagic(witness.stack[1])) return true;
-    const auto& carrier{witness.stack[1]};
     if (proof_found) {
-        error = "multiple Flockroot proof carriers";
+        error = "multiple Flockroot coinbase proof carriers";
         return false;
     }
     if (carrier.size() < PROOF_HEADER_SIZE) {
@@ -69,12 +67,33 @@ bool ExtractProof(const CScriptWitness& witness,
 
 } // namespace
 
+bool ExtractCoinbaseProof(const CTransaction& coinbase,
+                          std::vector<unsigned char>& proof,
+                          bool& proof_found,
+                          std::string& error)
+{
+    if (!coinbase.IsCoinBase()) {
+        error = "Flockroot proof source is not coinbase";
+        return false;
+    }
+    for (const CTxOut& output : coinbase.vout) {
+        const CScript& script{output.scriptPubKey};
+        if (script.empty() || script.front() != OP_RETURN) continue;
+        auto cursor{script.begin()};
+        opcodetype opcode;
+        std::vector<unsigned char> carrier;
+        if (!script.GetOp(cursor, opcode) || opcode != OP_RETURN) continue;
+        if (!script.GetOp(cursor, opcode, carrier) || opcode > OP_PUSHDATA4 || cursor != script.end()) continue;
+        if (!HasProofMagic(carrier)) continue;
+        if (!ExtractCarrier(carrier, proof, proof_found, error)) return false;
+    }
+    return true;
+}
+
 bool CollectTransactionStatements(const CTransaction& tx,
                                   const CCoinsViewCache& inputs,
                                   PrecomputedTransactionData& txdata,
                                   std::vector<Statement>& statements,
-                                  std::vector<unsigned char>& proof,
-                                  bool& proof_found,
                                   std::string& error)
 {
     std::vector<std::pair<size_t, std::vector<unsigned char>>> flockroot_inputs;
@@ -83,8 +102,7 @@ bool CollectTransactionStatements(const CTransaction& tx,
         std::vector<unsigned char> program;
         if (!IsFlockrootOutput(coin.out.scriptPubKey, program)) continue;
         const CScriptWitness& witness{tx.vin[input_index].scriptWitness};
-        if (!ExtractProof(witness, proof, proof_found, error)) return false;
-        if (witness.stack.size() == 1 || IsProofCarrier(witness)) {
+        if (witness.stack.size() == 1) {
             flockroot_inputs.emplace_back(input_index, std::move(program));
         }
     }
@@ -101,7 +119,7 @@ bool CollectTransactionStatements(const CTransaction& tx,
 
     for (const auto& [input_index, program] : flockroot_inputs) {
         const CScriptWitness& witness{tx.vin[input_index].scriptWitness};
-        if ((witness.stack.size() != 1 && !IsProofCarrier(witness)) ||
+        if (witness.stack.size() != 1 ||
             (witness.stack[0].size() != 64 && witness.stack[0].size() != 65)) {
             error = "invalid Flockroot key-spend witness";
             return false;

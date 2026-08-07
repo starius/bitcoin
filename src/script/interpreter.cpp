@@ -2004,7 +2004,7 @@ static bool VerifyWitnessProgram(const CScriptWitness& witness, int witversion, 
         if (stack.empty()) return set_error(serror, SCRIPT_ERR_WITNESS_PROGRAM_WITNESS_EMPTY);
         execdata.m_annex_present = false;
         execdata.m_annex_init = true;
-        if (stack.size() == 1 || flockroot::IsProofCarrier(witness)) {
+        if (stack.size() == 1) {
             if (!checker.CheckSchnorrSignature(stack.front(), program, SigVersion::TAPROOT, execdata, serror)) {
                 return false;
             }

@@ -2533,6 +2533,12 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
     std::vector<flockroot::Statement> flockroot_statements;
     std::vector<unsigned char> flockroot_proof;
     bool flockroot_proof_found{false};
+    std::string flockroot_extract_error;
+    if (!flockroot::ExtractCoinbaseProof(*block.vtx[0], flockroot_proof,
+                                         flockroot_proof_found, flockroot_extract_error)) {
+        return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
+                             "bad-flockroot-proof", flockroot_extract_error);
+    }
     blockundo.vtxundo.reserve(block.vtx.size() - 1);
     for (unsigned int i = 0; i < block.vtx.size(); i++)
     {
@@ -2574,9 +2580,8 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
             }
 
             std::string flockroot_error;
-            if (!flockroot::CollectTransactionStatements(tx, view, txsdata[i], flockroot_statements,
-                                                         flockroot_proof, flockroot_proof_found,
-                                                         flockroot_error)) {
+            if (!flockroot::CollectTransactionStatements(tx, view, txsdata[i],
+                                                         flockroot_statements, flockroot_error)) {
                 state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-flockroot-spend", flockroot_error);
                 break;
             }
