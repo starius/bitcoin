@@ -15,6 +15,7 @@
 #include <array>
 #include <cstdint>
 #include <limits>
+#include <optional>
 #include <span>
 #include <string>
 #include <vector>
@@ -108,6 +109,33 @@ bool CollectTransactionStatements(const CTransaction& tx,
     }
     if (flockroot_inputs.empty()) return true;
 
+    std::optional<unsigned char> cisa_mode;
+    for (const auto& [input_index, _] : flockroot_inputs) {
+        const auto& payload{tx.vin[input_index].scriptWitness.stack.front()};
+        const bool is_cisa{payload.size() != 64 && !payload.empty() && IsCisaMarker(payload.back())};
+        if (is_cisa) {
+            const unsigned char mode{static_cast<unsigned char>(payload.back() & ~CISA_NEGATED_BIT)};
+            if (cisa_mode && *cisa_mode != mode) {
+                error = "mixed CISA modes in one transaction";
+                return false;
+            }
+            cisa_mode = mode;
+        } else if (cisa_mode) {
+            error = "mixed ordinary and CISA Flockroot key spends";
+            return false;
+        }
+    }
+    if (cisa_mode) {
+        for (const auto& [input_index, _] : flockroot_inputs) {
+            const auto& payload{tx.vin[input_index].scriptWitness.stack.front()};
+            if (payload.empty() ||
+                (payload.back() & ~CISA_NEGATED_BIT) != *cisa_mode) {
+                error = "mixed ordinary and CISA Flockroot key spends";
+                return false;
+            }
+        }
+    }
+
     if (!txdata.m_spent_outputs_ready) {
         std::vector<CTxOut> spent_outputs;
         spent_outputs.reserve(tx.vin.size());
@@ -117,15 +145,15 @@ bool CollectTransactionStatements(const CTransaction& tx,
         txdata.Init(tx, std::move(spent_outputs), /*force=*/true);
     }
 
+    const uint32_t group{static_cast<uint32_t>(statements.size())};
     for (const auto& [input_index, program] : flockroot_inputs) {
         const CScriptWitness& witness{tx.vin[input_index].scriptWitness};
-        if (witness.stack.size() != 1 ||
-            (witness.stack[0].size() != 64 && witness.stack[0].size() != 65)) {
+        if (witness.stack.size() != 1) {
             error = "invalid Flockroot key-spend witness";
             return false;
         }
         uint8_t hash_type{SIGHASH_DEFAULT};
-        if (witness.stack[0].size() == 65) {
+        if (!cisa_mode && witness.stack[0].size() == 65) {
             hash_type = witness.stack[0].back();
             if (hash_type == SIGHASH_DEFAULT) {
                 error = "invalid Flockroot Schnorr sighash byte";
@@ -142,9 +170,14 @@ bool CollectTransactionStatements(const CTransaction& tx,
             return false;
         }
         Statement& statement{statements.emplace_back()};
+        statement.group = group;
         std::copy(program.begin(), program.end(), statement.output_key.begin());
         statement.sighash = sighash;
-        std::copy_n(witness.stack[0].begin(), statement.signature.size(), statement.signature.begin());
+        if (cisa_mode) {
+            statement.payload = witness.stack[0];
+        } else {
+            statement.payload.assign(witness.stack[0].begin(), witness.stack[0].begin() + 64);
+        }
     }
     return true;
 }
@@ -168,12 +201,14 @@ bool VerifyBlockProof(const std::vector<Statement>& statements,
     }
 
     std::vector<unsigned char> encoded;
-    encoded.reserve(4 + statements.size() * 128);
+    encoded.reserve(4 + statements.size() * 140);
     WriteLE32(encoded, statements.size());
     for (const Statement& statement : statements) {
+        WriteLE32(encoded, statement.group);
         encoded.insert(encoded.end(), statement.output_key.begin(), statement.output_key.end());
         encoded.insert(encoded.end(), statement.sighash.begin(), statement.sighash.end());
-        encoded.insert(encoded.end(), statement.signature.begin(), statement.signature.end());
+        WriteLE32(encoded, statement.payload.size());
+        encoded.insert(encoded.end(), statement.payload.begin(), statement.payload.end());
     }
     if (!flockroot_verify_block(encoded.data(), encoded.size(), proof.data(), proof.size())) {
         error = "invalid Flockroot block proof";

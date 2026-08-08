@@ -8,6 +8,7 @@
 #include <uint256.h>
 
 #include <array>
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -21,9 +22,10 @@ static constexpr int WITNESS_VERSION{2};
 static constexpr size_t WITNESS_PROGRAM_SIZE{32};
 
 struct Statement {
+    uint32_t group;
     std::array<unsigned char, WITNESS_PROGRAM_SIZE> output_key;
     uint256 sighash;
-    std::array<unsigned char, 64> signature;
+    std::vector<unsigned char> payload;
 };
 
 bool ExtractCoinbaseProof(const CTransaction& coinbase,

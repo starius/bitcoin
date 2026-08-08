@@ -2006,8 +2006,18 @@ static bool VerifyWitnessProgram(const CScriptWitness& witness, int witversion, 
         execdata.m_annex_init = true;
         if (stack.size() == 1) {
             const valtype& sig = stack.front();
-            if (sig.size() != 64 && sig.size() != 65) return set_error(serror, SCRIPT_ERR_SCHNORR_SIG_SIZE);
-            if (sig.size() == 65 && sig.back() == SIGHASH_DEFAULT) return set_error(serror, SCRIPT_ERR_SCHNORR_SIG_HASHTYPE);
+            const bool cisa_known_key{sig.size() == 33 && flockroot::IsCisaMarker(sig.back())};
+            const bool cisa_full{sig.size() == 65 &&
+                                 (sig.back() & ~flockroot::CISA_NEGATED_BIT) == flockroot::FULL_CISA_MARKER};
+            const bool cisa_half{sig.size() >= 65 && (sig.size() - 33) % 32 == 0 &&
+                                 (sig.back() & ~flockroot::CISA_NEGATED_BIT) == flockroot::HALF_CISA_MARKER};
+            const bool ordinary{sig.size() == 64 || (sig.size() == 65 && !flockroot::IsCisaMarker(sig.back()))};
+            if (!ordinary && !cisa_known_key && !cisa_full && !cisa_half) {
+                return set_error(serror, SCRIPT_ERR_SCHNORR_SIG_SIZE);
+            }
+            if (ordinary && sig.size() == 65 && sig.back() == SIGHASH_DEFAULT) {
+                return set_error(serror, SCRIPT_ERR_SCHNORR_SIG_HASHTYPE);
+            }
             // The recoverable EC relation and companion PQ authorization are checked once per block.
             return set_success(serror);
         }
