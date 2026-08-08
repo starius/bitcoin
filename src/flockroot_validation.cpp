@@ -144,6 +144,7 @@ bool CollectTransactionStatements(const CTransaction& tx,
         Statement& statement{statements.emplace_back()};
         std::copy(program.begin(), program.end(), statement.output_key.begin());
         statement.sighash = sighash;
+        std::copy_n(witness.stack[0].begin(), statement.signature.size(), statement.signature.begin());
     }
     return true;
 }
@@ -167,11 +168,12 @@ bool VerifyBlockProof(const std::vector<Statement>& statements,
     }
 
     std::vector<unsigned char> encoded;
-    encoded.reserve(4 + statements.size() * 64);
+    encoded.reserve(4 + statements.size() * 128);
     WriteLE32(encoded, statements.size());
     for (const Statement& statement : statements) {
         encoded.insert(encoded.end(), statement.output_key.begin(), statement.output_key.end());
         encoded.insert(encoded.end(), statement.sighash.begin(), statement.sighash.end());
+        encoded.insert(encoded.end(), statement.signature.begin(), statement.signature.end());
     }
     if (!flockroot_verify_block(encoded.data(), encoded.size(), proof.data(), proof.size())) {
         error = "invalid Flockroot block proof";

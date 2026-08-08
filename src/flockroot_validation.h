@@ -23,6 +23,7 @@ static constexpr size_t WITNESS_PROGRAM_SIZE{32};
 struct Statement {
     std::array<unsigned char, WITNESS_PROGRAM_SIZE> output_key;
     uint256 sighash;
+    std::array<unsigned char, 64> signature;
 };
 
 bool ExtractCoinbaseProof(const CTransaction& coinbase,

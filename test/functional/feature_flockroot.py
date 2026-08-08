@@ -13,11 +13,12 @@ from test_framework.blocktools import (
     create_coinbase,
 )
 from test_framework.key import (
+    ORDER,
     TaggedHash,
     compute_xonly_pubkey,
-    sign_schnorr,
     tweak_add_privkey,
 )
+from test_framework.crypto import secp256k1
 from test_framework.messages import (
     COutPoint,
     CTransaction,
@@ -47,22 +48,20 @@ TARGET_BLOCK_WEIGHT = 3_950_000
 FILLER_CHUNK_SIZE = 8_000
 
 
-def pq_root(public_key, path=()):
-    root = TaggedHash("Flockroot/PQLeaf", bytes([0]) + public_key)
+def pq_leaf(public_key):
+    return TaggedHash("Flockroot/PQLeaf", bytes([0]) + public_key)
+
+
+def taproot_tree_root(leaf, path=()):
+    root = leaf
     for sibling in path:
-        root = TaggedHash("Flockroot/PQBranch", b"".join(sorted([root, sibling])))
+        root = TaggedHash("TapBranch", b"".join(sorted([root, sibling])))
     return root
 
 
-def taproot_tree_root(pq_tree_root, script_root=None):
-    if script_root is None:
-        return pq_tree_root
-    return TaggedHash("TapBranch", b"".join(sorted([pq_tree_root, script_root])))
-
-
-def derive_flockroot_key(internal_secret, public_key, pq_path=(), script_root=None):
+def derive_flockroot_key(internal_secret, public_key, tap_path=()):
     internal_key = compute_xonly_pubkey(internal_secret)[0]
-    tree_root = taproot_tree_root(pq_root(public_key, pq_path), script_root)
+    tree_root = taproot_tree_root(pq_leaf(public_key), tap_path)
     tap_tweak = TaggedHash("TapTweak", internal_key + tree_root)
     output_secret = tweak_add_privkey(internal_secret, tap_tweak)
     assert output_secret is not None
@@ -70,14 +69,46 @@ def derive_flockroot_key(internal_secret, public_key, pq_path=(), script_root=No
     return internal_key, tap_tweak, output_secret, output_key, output_negated
 
 
-def find_even_flockroot_key(first_secret, public_key, pq_path=(), script_root=None):
-    candidate = first_secret
-    while True:
-        secret = candidate.to_bytes(32, "big")
-        derived = derive_flockroot_key(secret, public_key, pq_path, script_root)
-        if not derived[-1]:
-            return secret, derived
-        candidate += 1
+def compressed_point(point):
+    return bytes([2 if point.y.is_even() else 3]) + point.to_bytes_xonly()
+
+
+def sign_recoverable(output_secret, internal_secret, output_negated, output_key, message, aux=bytes(32)):
+    q = int.from_bytes(output_secret, "big")
+    if not (q * secp256k1.G).y.is_even():
+        q = ORDER - q
+    p = int.from_bytes(internal_secret, "big")
+    if not (p * secp256k1.G).y.is_even():
+        p = ORDER - p
+    if output_negated:
+        p = ORDER - p
+    effective_internal = p * secp256k1.G
+    masked_q = q ^ int.from_bytes(TaggedHash("Flockroot/aux", aux), "big")
+    for counter in range(2**32):
+        nonce_input = (
+            masked_q.to_bytes(32, "big")
+            + compressed_point(effective_internal)
+            + output_key
+            + message
+            + counter.to_bytes(4, "big")
+        )
+        r = int.from_bytes(TaggedHash("Flockroot/nonce", nonce_input), "big") % ORDER
+        if r == 0:
+            continue
+        R = r * secp256k1.G
+        if not R.y.is_even():
+            r = ORDER - r
+            R = -R
+        e = int.from_bytes(
+            TaggedHash("Flockroot/challenge", R.to_bytes_xonly() + output_key + message),
+            "big",
+        ) % ORDER
+        if e in (0, 1):
+            continue
+        s = (r - p + e * q) % ORDER
+        if s != 0:
+            return R.to_bytes_xonly() + s.to_bytes(32, "big")
+    raise AssertionError("nonce retry counter exhausted")
 
 
 class FlockrootTest(BitcoinTestFramework):
@@ -141,11 +172,13 @@ class FlockrootTest(BitcoinTestFramework):
         key_records = []
         next_internal_secret = 1
         for index in range(spend_count):
-            internal_secret, derived = find_even_flockroot_key(
-                next_internal_secret, shrincs_public
-            )
+            internal_secret = next_internal_secret.to_bytes(32, "big")
+            tap_path = [
+                TaggedHash("Flockroot/TestSibling", index.to_bytes(4, "big") + level.to_bytes(1, "big"))
+                for level in range(index % 5)
+            ]
+            derived = derive_flockroot_key(internal_secret, shrincs_public, tap_path)
             internal_key, tap_tweak, output_secret, output_key, output_negated = derived
-            assert not output_negated
             next_internal_secret = int.from_bytes(internal_secret, "big") + 1
             key_records.append({
                 "internal_secret": internal_secret,
@@ -153,6 +186,8 @@ class FlockrootTest(BitcoinTestFramework):
                 "tap_tweak": tap_tweak,
                 "output_secret": output_secret,
                 "output_key": output_key,
+                "output_negated": output_negated,
+                "tap_path": tap_path,
                 "script_pubkey": CScript([OP_2, output_key]),
                 "address": encode_segwit_address("bcrt", 2, output_key),
             })
@@ -162,8 +197,15 @@ class FlockrootTest(BitcoinTestFramework):
         script_root = TaggedHash(
             "TapLeaf", bytes([LEAF_VERSION_TAPSCRIPT]) + ser_string(leaf_script)
         )
-        script_internal_secret, script_derived = find_even_flockroot_key(
-            next_internal_secret, shrincs_public, script_root=script_root
+        other_script = CScript([OP_RETURN])
+        other_leaf = TaggedHash(
+            "TapLeaf", bytes([LEAF_VERSION_TAPSCRIPT]) + ser_string(other_script)
+        )
+        pq_node = TaggedHash("TapBranch", b"".join(sorted([pq_leaf(shrincs_public), other_leaf])))
+        script_tap_path = [other_leaf, script_root]
+        script_internal_secret = next_internal_secret.to_bytes(32, "big")
+        script_derived = derive_flockroot_key(
+            script_internal_secret, shrincs_public, script_tap_path
         )
         (
             script_internal_key,
@@ -172,7 +214,6 @@ class FlockrootTest(BitcoinTestFramework):
             script_output_key,
             script_output_negated,
         ) = script_derived
-        assert not script_output_negated
         flockroot_script_tree = CScript([OP_2, script_output_key])
         flockroot_script_address = encode_segwit_address("bcrt", 2, script_output_key)
 
@@ -197,7 +238,13 @@ class FlockrootTest(BitcoinTestFramework):
             sighash = TaprootSignatureHash(
                 tx, [funding_tx.vout[index]], SIGHASH_DEFAULT, input_index=0
             )
-            signature = sign_schnorr(key_record["output_secret"], sighash)
+            signature = sign_recoverable(
+                key_record["output_secret"],
+                key_record["internal_secret"],
+                key_record["output_negated"],
+                key_record["output_key"],
+                sighash,
+            )
             assert_equal(len(signature), 64)
             tx.wit.vtxinwit = [CTxInWitness()]
             tx.wit.vtxinwit[0].scriptWitness.stack = [signature]
@@ -214,9 +261,9 @@ class FlockrootTest(BitcoinTestFramework):
                     "sl_root": shrincs_public[16:32].hex(),
                     "sf_root": shrincs_public[32:48].hex(),
                 },
-                "pq_path": [],
-                "script_root": None,
+                "tap_path": [sibling.hex() for sibling in key_record["tap_path"]],
                 "message": sighash.hex(),
+                "output_signature": signature.hex(),
                 "signature": {"bytes": shrincs_signature.hex()},
             })
 
@@ -231,7 +278,7 @@ class FlockrootTest(BitcoinTestFramework):
             bytes(leaf_script),
             bytes([LEAF_VERSION_TAPSCRIPT | script_output_negated])
             + script_internal_key
-            + pq_root(shrincs_public),
+            + pq_node,
         ]
         assert_equal(
             [len(element) for element in script_tx.wit.vtxinwit[0].scriptWitness.stack],

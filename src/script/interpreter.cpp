@@ -2005,9 +2005,10 @@ static bool VerifyWitnessProgram(const CScriptWitness& witness, int witversion, 
         execdata.m_annex_present = false;
         execdata.m_annex_init = true;
         if (stack.size() == 1) {
-            if (!checker.CheckSchnorrSignature(stack.front(), program, SigVersion::TAPROOT, execdata, serror)) {
-                return false;
-            }
+            const valtype& sig = stack.front();
+            if (sig.size() != 64 && sig.size() != 65) return set_error(serror, SCRIPT_ERR_SCHNORR_SIG_SIZE);
+            if (sig.size() == 65 && sig.back() == SIGHASH_DEFAULT) return set_error(serror, SCRIPT_ERR_SCHNORR_SIG_HASHTYPE);
+            // The recoverable EC relation and companion PQ authorization are checked once per block.
             return set_success(serror);
         }
 
