@@ -549,16 +549,21 @@ class FlockrootTest(BitcoinTestFramework):
             )
             assert_equal(node0.submitblock(duplicate_block.serialize().hex()), "bad-flockroot-proof")
 
-        cisa_transaction_indices = []
+        cisa_witnesses_to_change = []
         if full_groups:
-            cisa_transaction_indices.append(ordinary_end)
+            cisa_witnesses_to_change.append((ordinary_end, 0))
+            if len(full_groups) > 1 and len(full_groups[1]) > 1:
+                cisa_witnesses_to_change.append((ordinary_end + 1, 1))
         if half_groups:
-            cisa_transaction_indices.append(ordinary_end + len(full_groups))
-        for transaction_index in cisa_transaction_indices:
+            half_start = ordinary_end + len(full_groups)
+            cisa_witnesses_to_change.append((half_start, 0))
+            if len(half_groups) > 1 and len(half_groups[1]) > 1:
+                cisa_witnesses_to_change.append((half_start + 1, 1))
+        for transaction_index, input_index in cisa_witnesses_to_change:
             changed_transactions = copy.deepcopy(transactions)
-            changed_transactions[transaction_index].wit.vtxinwit[0].scriptWitness.stack[0] = (
-                bytes([changed_transactions[transaction_index].wit.vtxinwit[0].scriptWitness.stack[0][0] ^ 1])
-                + changed_transactions[transaction_index].wit.vtxinwit[0].scriptWitness.stack[0][1:]
+            witness = changed_transactions[transaction_index].wit.vtxinwit[input_index].scriptWitness
+            witness.stack[0] = (
+                bytes([witness.stack[0][0] ^ 1]) + witness.stack[0][1:]
             )
             changed_block, _ = self.make_block(
                 changed_transactions, total_fees, proof=proof
