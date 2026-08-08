@@ -28,15 +28,12 @@ struct Statement {
     std::vector<unsigned char> payload;
 };
 
-bool ExtractCoinbaseProof(const CTransaction& coinbase,
-                          std::vector<unsigned char>& proof,
-                          bool& proof_found,
-                          std::string& error);
-
 bool CollectTransactionStatements(const CTransaction& tx,
                                   const CCoinsViewCache& inputs,
                                   PrecomputedTransactionData& txdata,
                                   std::vector<Statement>& statements,
+                                  std::vector<unsigned char>& proof,
+                                  bool& proof_found,
                                   std::string& error);
 
 bool VerifyBlockProof(const std::vector<Statement>& statements,

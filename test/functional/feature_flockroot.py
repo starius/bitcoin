@@ -20,7 +20,6 @@ from test_framework.key import (
     sign_schnorr,
     tweak_add_privkey,
 )
-from test_framework.crypto import secp256k1
 from test_framework.messages import (
     COutPoint,
     CTransaction,
@@ -50,9 +49,6 @@ PROOF_VERSION = 1
 TARGET_BLOCK_WEIGHT = 3_950_000
 FILLER_CHUNK_SIZE = 8_000
 NORMAL_TAPROOT_SPENDS_PER_MODE = 8
-FULL_CISA_MARKER = 0x04
-HALF_CISA_MARKER = 0x05
-CISA_NEGATED_BIT = 0x80
 
 
 def pq_leaf(public_key):
@@ -73,143 +69,11 @@ def derive_flockroot_key(internal_secret, public_key, tap_path=()):
     output_secret = tweak_add_privkey(internal_secret, tap_tweak)
     assert output_secret is not None
     output_key, output_negated = compute_xonly_pubkey(output_secret)
-    return internal_key, tap_tweak, output_secret, output_key, output_negated
-
-
-def compressed_point(point):
-    return bytes([2 if point.y.is_even() else 3]) + point.to_bytes_xonly()
-
-
-def normalized_secret(secret):
-    value = int.from_bytes(secret, "big")
-    return ORDER - value if not (value * secp256k1.G).y.is_even() else value
-
-
-def cisa_marker(base, output_negated):
-    return base | (CISA_NEGATED_BIT if output_negated else 0)
-
-
-def sign_full_cisa(key_records, messages):
-    nonce_input = b"".join(
-        normalized_secret(record["internal_secret"]).to_bytes(32, "big")
-        + record["output_key"]
-        + message
-        for record, message in zip(key_records, messages)
-    )
-    k = int.from_bytes(TaggedHash("Flockroot/TestFullNonce", nonce_input), "big") % ORDER
-    assert k != 0
-    R = k * secp256k1.G
-    if not R.y.is_even():
-        k = ORDER - k
-        R = -R
-    r = R.to_bytes_xonly()
-    message_list = b"".join(
-        record["output_key"] + message
-        for record, message in zip(key_records, messages)
-    )
-    coefficients = [
-        int.from_bytes(
-            TaggedHash(
-                "Flockroot/FullAgg/sig",
-                message_list + r + record["output_key"] + message,
-            ),
-            "big",
-        ) % ORDER
-        for record, message in zip(key_records, messages)
-    ]
-    assert coefficients[0] != 0
-    s = (
-        k
-        + sum(
-            coefficient * normalized_secret(record["internal_secret"])
-            for coefficient, record in zip(coefficients, key_records)
-        )
-    ) % ORDER
-    return r + s.to_bytes(32, "big")
-
-
-def sign_half_cisa(key_records, messages):
-    nonces = []
-    responses = []
-    for index, (record, message) in enumerate(zip(key_records, messages)):
-        secret = normalized_secret(record["internal_secret"])
-        nonce_input = secret.to_bytes(32, "big") + record["output_key"] + message
-        k = int.from_bytes(
-            TaggedHash("Flockroot/TestHalfNonce", index.to_bytes(4, "big") + nonce_input),
-            "big",
-        ) % ORDER
-        assert k != 0
-        R = k * secp256k1.G
-        if not R.y.is_even():
-            k = ORDER - k
-            R = -R
-        r = R.to_bytes_xonly()
-        e = int.from_bytes(
-            TaggedHash("Flockroot/HalfAgg/challenge", r + record["output_key"] + message),
-            "big",
-        ) % ORDER
-        nonces.append(r)
-        responses.append((k + e * secret) % ORDER)
-
-    prefix = b""
-    randomizers = []
-    for index, (r, record, message) in enumerate(zip(nonces, key_records, messages)):
-        prefix += r + record["output_key"] + message
-        randomizers.append(
-            1
-            if index == 0
-            else int.from_bytes(
-                TaggedHash("Flockroot/HalfAgg/randomizer", prefix), "big"
-            ) % ORDER
-        )
-    e0 = int.from_bytes(
-        TaggedHash(
-            "Flockroot/HalfAgg/challenge",
-            nonces[0] + key_records[0]["output_key"] + messages[0],
-        ),
-        "big",
-    ) % ORDER
-    assert randomizers[0] * e0 % ORDER != 0
-    response = sum(z * s for z, s in zip(randomizers, responses)) % ORDER
-    return b"".join(nonces) + response.to_bytes(32, "big")
-
-
-def sign_recoverable(output_secret, internal_secret, output_negated, output_key, message, aux=bytes(32)):
-    q = int.from_bytes(output_secret, "big")
-    if not (q * secp256k1.G).y.is_even():
-        q = ORDER - q
-    p = int.from_bytes(internal_secret, "big")
-    if not (p * secp256k1.G).y.is_even():
-        p = ORDER - p
-    if output_negated:
-        p = ORDER - p
-    effective_internal = p * secp256k1.G
-    masked_q = q ^ int.from_bytes(TaggedHash("Flockroot/aux", aux), "big")
-    for counter in range(2**32):
-        nonce_input = (
-            masked_q.to_bytes(32, "big")
-            + compressed_point(effective_internal)
-            + output_key
-            + message
-            + counter.to_bytes(4, "big")
-        )
-        r = int.from_bytes(TaggedHash("Flockroot/nonce", nonce_input), "big") % ORDER
-        if r == 0:
-            continue
-        R = r * secp256k1.G
-        if not R.y.is_even():
-            r = ORDER - r
-            R = -R
-        e = int.from_bytes(
-            TaggedHash("Flockroot/challenge", R.to_bytes_xonly() + output_key + message),
-            "big",
-        ) % ORDER
-        if e in (0, 1):
-            continue
-        s = (r - p + e * q) % ORDER
-        if s != 0:
-            return R.to_bytes_xonly() + s.to_bytes(32, "big")
-    raise AssertionError("nonce retry counter exhausted")
+    tweak_scalar = int.from_bytes(tap_tweak, "big")
+    signed_tweak = (
+        (ORDER - tweak_scalar) % ORDER if output_negated else tweak_scalar
+    ).to_bytes(32, "big")
+    return internal_key, tap_tweak, signed_tweak, output_secret, output_key, output_negated
 
 
 class FlockrootTest(BitcoinTestFramework):
@@ -228,18 +92,25 @@ class FlockrootTest(BitcoinTestFramework):
         tip = int(node.getbestblockhash(), 16)
         block_time = node.getblock(node.getbestblockhash())["time"] + 1
         coinbase = create_coinbase(height, fees=fees)
-        for tx in transactions:
-            witness = tx.wit.vtxinwit[0].scriptWitness
-            if witness.stack and len(witness.stack[0]) in (64, 65):
-                witness.stack = [witness.stack[0]]
+        block_transactions = copy.deepcopy(transactions)
 
         if proof is not None:
             carrier = PROOF_MAGIC + bytes([PROOF_VERSION]) + proof
-            coinbase.vout.append(CTxOut(0, CScript([OP_RETURN, carrier])))
-            if duplicate_proof:
-                coinbase.vout.append(CTxOut(0, CScript([OP_RETURN, carrier])))
+            carriers_needed = 2 if duplicate_proof else 1
+            carriers_added = 0
+            for tx in block_transactions:
+                for txin_witness in tx.wit.vtxinwit:
+                    witness = txin_witness.scriptWitness
+                    if len(witness.stack) == 1 and len(witness.stack[0]) in (96, 97):
+                        witness.stack.append(carrier)
+                        carriers_added += 1
+                        if carriers_added == carriers_needed:
+                            break
+                if carriers_added == carriers_needed:
+                    break
+            assert_equal(carriers_added, carriers_needed)
 
-        block = create_block(tip, coinbase, ntime=block_time, txlist=transactions)
+        block = create_block(tip, coinbase, ntime=block_time, txlist=block_transactions)
         if fill:
             filler_index = 0
             # Leave room for the witness commitment and serialization boundary effects.
@@ -247,7 +118,7 @@ class FlockrootTest(BitcoinTestFramework):
                 payload = b"FILL" + filler_index.to_bytes(4, "little") + bytes(FILLER_CHUNK_SIZE - 8)
                 coinbase.vout.append(CTxOut(0, CScript([OP_RETURN, payload])))
                 filler_index += 1
-                block = create_block(tip, coinbase, ntime=block_time, txlist=transactions)
+                block = create_block(tip, coinbase, ntime=block_time, txlist=block_transactions)
 
         add_witness_commitment(block)
         assert block.get_weight() <= 4_000_000
@@ -265,7 +136,7 @@ class FlockrootTest(BitcoinTestFramework):
         from shrincs import FXMSS_SHAPE_BALANCED, shrincs_keygen, shrincs_sign
 
         spend_count = self.options.flockroot_spends
-        assert 0 < spend_count <= 64
+        assert 0 < spend_count <= 256
         tree_depth = max(1, (spend_count - 1).bit_length())
         shrincs_secret, shrincs_public = shrincs_keygen(
             bytes(range(48)), bytes([FXMSS_SHAPE_BALANCED, tree_depth])
@@ -279,12 +150,20 @@ class FlockrootTest(BitcoinTestFramework):
                 for level in range(index % 5)
             ]
             derived = derive_flockroot_key(internal_secret, shrincs_public, tap_path)
-            internal_key, tap_tweak, output_secret, output_key, output_negated = derived
+            (
+                internal_key,
+                tap_tweak,
+                signed_tweak,
+                output_secret,
+                output_key,
+                output_negated,
+            ) = derived
             next_internal_secret = int.from_bytes(internal_secret, "big") + 1
             key_records.append({
                 "internal_secret": internal_secret,
                 "internal_key": internal_key,
                 "tap_tweak": tap_tweak,
+                "signed_tweak": signed_tweak,
                 "output_secret": output_secret,
                 "output_key": output_key,
                 "output_negated": output_negated,
@@ -292,6 +171,7 @@ class FlockrootTest(BitcoinTestFramework):
                 "script_pubkey": CScript([OP_2, output_key]),
                 "address": encode_segwit_address("bcrt", 2, output_key),
             })
+        assert_equal(len({record["address"] for record in key_records}), spend_count)
         flockroot_address = key_records[0]["address"]
 
         leaf_script = CScript([OP_TRUE])
@@ -311,6 +191,7 @@ class FlockrootTest(BitcoinTestFramework):
         (
             script_internal_key,
             script_tap_tweak,
+            _,
             script_output_secret,
             script_output_key,
             script_output_negated,
@@ -360,12 +241,10 @@ class FlockrootTest(BitcoinTestFramework):
         transactions = []
         authorizations = []
         fee_per_spend = 1_000
-        stateless_spends = 1
 
         def append_authorization(index, sighash):
             key_record = key_records[index]
-            state_counter = None if index >= spend_count - stateless_spends else index
-            shrincs_signature = shrincs_sign(sighash, shrincs_secret, state_counter, None)
+            shrincs_signature = shrincs_sign(sighash, shrincs_secret, index, None)
             assert shrincs_signature is not None
             authorizations.append({
                 "output_key": key_record["output_key"].hex(),
@@ -380,18 +259,7 @@ class FlockrootTest(BitcoinTestFramework):
                 "signature": {"bytes": shrincs_signature.hex()},
             })
 
-        ordinary_end = spend_count if spend_count < 8 else spend_count // 2
-        remaining = list(range(ordinary_end, spend_count))
-        full_end = (len(remaining) + 1) // 2
-        full_indices = remaining[:full_end]
-        half_indices = remaining[full_end:]
-
-        def groups_with_single(indices):
-            if len(indices) <= 1:
-                return [indices] if indices else []
-            return [[indices[0]], indices[1:]]
-
-        for index in range(ordinary_end):
+        for index in range(spend_count):
             key_record = key_records[index]
             tx = CTransaction()
             tx.vin = [CTxIn(COutPoint(funding_tx.txid_int, index))]
@@ -399,55 +267,14 @@ class FlockrootTest(BitcoinTestFramework):
             sighash = TaprootSignatureHash(
                 tx, [funding_tx.vout[index]], SIGHASH_DEFAULT, input_index=0
             )
-            signature = sign_recoverable(
-                key_record["output_secret"],
-                key_record["internal_secret"],
-                key_record["output_negated"],
-                key_record["output_key"],
-                sighash,
-            )
+            signature = sign_schnorr(key_record["output_secret"], sighash)
             assert_equal(len(signature), 64)
+            payload = signature + key_record["signed_tweak"]
+            assert_equal(len(payload), 96)
             tx.wit.vtxinwit = [CTxInWitness()]
-            tx.wit.vtxinwit[0].scriptWitness.stack = [signature]
+            tx.wit.vtxinwit[0].scriptWitness.stack = [payload]
             transactions.append(tx)
             append_authorization(index, sighash)
-
-        def add_cisa_group(indices, mode):
-            records = [key_records[index] for index in indices]
-            tx = CTransaction()
-            tx.vin = [CTxIn(COutPoint(funding_tx.txid_int, index)) for index in indices]
-            tx.vout = [CTxOut(
-                sum(funding_tx.vout[index].nValue for index in indices)
-                - fee_per_spend * len(indices),
-                CScript([OP_TRUE]),
-            )]
-            prevouts = [funding_tx.vout[index] for index in indices]
-            messages = [
-                TaprootSignatureHash(
-                    tx, prevouts, SIGHASH_DEFAULT, input_index=input_index
-                )
-                for input_index in range(len(indices))
-            ]
-            aggregate = (
-                sign_full_cisa(records, messages)
-                if mode == FULL_CISA_MARKER
-                else sign_half_cisa(records, messages)
-            )
-            tx.wit.vtxinwit = [CTxInWitness() for _ in indices]
-            for input_index, record in enumerate(records):
-                marker = bytes([cisa_marker(mode, record["output_negated"])])
-                payload = aggregate if input_index == 0 else record["internal_key"]
-                tx.wit.vtxinwit[input_index].scriptWitness.stack = [payload + marker]
-            transactions.append(tx)
-            for index, message in zip(indices, messages):
-                append_authorization(index, message)
-
-        full_groups = groups_with_single(full_indices)
-        half_groups = groups_with_single(half_indices)
-        for indices in full_groups:
-            add_cisa_group(indices, FULL_CISA_MARKER)
-        for indices in half_groups:
-            add_cisa_group(indices, HALF_CISA_MARKER)
 
         script_tx = CTransaction()
         script_tx.vin = [CTxIn(COutPoint(funding_tx.txid_int, spend_count))]
@@ -544,26 +371,18 @@ class FlockrootTest(BitcoinTestFramework):
             duplicate_block, _ = self.make_block(
                 transactions,
                 total_fees,
-                proof=proof[:1],
+                proof=proof,
                 duplicate_proof=True,
             )
-            assert_equal(node0.submitblock(duplicate_block.serialize().hex()), "bad-flockroot-proof")
+            assert_equal(node0.submitblock(duplicate_block.serialize().hex()), "bad-flockroot-spend")
 
-        cisa_witnesses_to_change = []
-        if full_groups:
-            cisa_witnesses_to_change.append((ordinary_end, 0))
-            if len(full_groups) > 1 and len(full_groups[1]) > 1:
-                cisa_witnesses_to_change.append((ordinary_end + 1, 1))
-        if half_groups:
-            half_start = ordinary_end + len(full_groups)
-            cisa_witnesses_to_change.append((half_start, 0))
-            if len(half_groups) > 1 and len(half_groups[1]) > 1:
-                cisa_witnesses_to_change.append((half_start + 1, 1))
-        for transaction_index, input_index in cisa_witnesses_to_change:
+        for mutation_offset in (0, 64):
             changed_transactions = copy.deepcopy(transactions)
-            witness = changed_transactions[transaction_index].wit.vtxinwit[input_index].scriptWitness
+            witness = changed_transactions[0].wit.vtxinwit[0].scriptWitness
             witness.stack[0] = (
-                bytes([witness.stack[0][0] ^ 1]) + witness.stack[0][1:]
+                witness.stack[0][:mutation_offset]
+                + bytes([witness.stack[0][mutation_offset] ^ 1])
+                + witness.stack[0][mutation_offset + 1:]
             )
             changed_block, _ = self.make_block(
                 changed_transactions, total_fees, proof=proof
@@ -593,6 +412,7 @@ class FlockrootTest(BitcoinTestFramework):
                 "ec_output_secret": record["output_secret"].hex(),
                 "ec_output_key": record["output_key"].hex(),
                 "tap_tweak": record["tap_tweak"].hex(),
+                "signed_tweak": record["signed_tweak"].hex(),
                 "script_pubkey": record["script_pubkey"].hex(),
                 "address": record["address"],
             } for record in key_records],
@@ -608,27 +428,46 @@ class FlockrootTest(BitcoinTestFramework):
             "script_path_address": flockroot_script_address,
             "script_path_script_pubkey": flockroot_script_tree.hex(),
         }, indent=2) + "\n")
+        proof_carrier = PROOF_MAGIC + bytes([PROOF_VERSION]) + proof
+        proof_witness_element_bytes = len(ser_string(proof_carrier))
+        carrier_witness = block.vtx[1].wit.vtxinwit[0].scriptWitness.stack
+        assert_equal([len(element) for element in carrier_witness], [96, len(proof_carrier)])
+        (artifact_dir / "proof-carrier-witness.json").write_text(json.dumps([
+            {
+                "bytes": len(element),
+                "hex": element.hex(),
+                "meaning": "BIP-340 signature || signed TapTweak"
+                if index == 0 else "discounted block-level Flock proof carrier",
+            }
+            for index, element in enumerate(carrier_witness)
+        ], indent=2) + "\n")
         metrics = {
-            "name": "Flockroot",
+            "name": "Flockroot explicit tweaks",
             "key_path_spends": spend_count,
-            "ordinary_flockroot_key_spends": ordinary_end,
-            "full_cisa_group_sizes": [len(group) for group in full_groups],
-            "half_cisa_group_sizes": [len(group) for group in half_groups],
-            "full_cisa_payload_bytes": sum(33 * len(group) + 32 for group in full_groups),
-            "half_cisa_payload_bytes": sum(65 * len(group) for group in half_groups),
-            "stateful_pq_spends": spend_count - stateless_spends,
-            "stateless_pq_spends": stateless_spends,
+            "unique_flockroot_addresses": len({record["address"] for record in key_records}),
+            "key_spend_payload_bytes_each": 96,
+            "key_spend_payload_bytes_total": 96 * spend_count,
+            "stateful_pq_spends": spend_count,
+            "stateless_pq_spends": 0,
             "script_path_spends": 1,
             "ordinary_taproot_key_spends": NORMAL_TAPROOT_SPENDS_PER_MODE,
             "ordinary_taproot_script_spends": NORMAL_TAPROOT_SPENDS_PER_MODE,
             "total_flockroot_spends": spend_count + 1,
             "proof_bytes": len(proof),
-            "proof_coinbase_payload_bytes": len(PROOF_MAGIC) + 1 + len(proof),
+            "proof_carrier_bytes": len(proof_carrier),
+            "proof_discounted_witness_bytes": proof_witness_element_bytes,
+            "proof_discounted_weight": proof_witness_element_bytes,
+            "proof_if_base_weight": 4 * proof_witness_element_bytes,
             "workload_block_bytes": len(workload_block.serialize()),
             "workload_block_weight": workload_block.get_weight(),
+            "explicit_key_transactions_weight": sum(
+                tx.get_weight() for tx in transactions[:spend_count]
+            ),
             "workload_solve_seconds": workload_solve_seconds,
             "block_bytes": len(block.serialize()),
             "block_weight": block.get_weight(),
+            "filler_weight": block.get_weight() - workload_block.get_weight(),
+            "workload_weight_percent": 100 * workload_block.get_weight() / block.get_weight(),
             "prove_seconds": prove_seconds,
             "solve_seconds": solve_seconds,
             "mine_including_prove_seconds": prove_seconds + solve_seconds,

@@ -2004,21 +2004,16 @@ static bool VerifyWitnessProgram(const CScriptWitness& witness, int witversion, 
         if (stack.empty()) return set_error(serror, SCRIPT_ERR_WITNESS_PROGRAM_WITNESS_EMPTY);
         execdata.m_annex_present = false;
         execdata.m_annex_init = true;
-        if (stack.size() == 1) {
-            const valtype& sig = stack.front();
-            const bool cisa_known_key{sig.size() == 33 && flockroot::IsCisaMarker(sig.back())};
-            const bool cisa_full{sig.size() == 65 &&
-                                 (sig.back() & ~flockroot::CISA_NEGATED_BIT) == flockroot::FULL_CISA_MARKER};
-            const bool cisa_half{sig.size() >= 65 && (sig.size() - 33) % 32 == 0 &&
-                                 (sig.back() & ~flockroot::CISA_NEGATED_BIT) == flockroot::HALF_CISA_MARKER};
-            const bool ordinary{sig.size() == 64 || (sig.size() == 65 && !flockroot::IsCisaMarker(sig.back()))};
-            if (!ordinary && !cisa_known_key && !cisa_full && !cisa_half) {
+        const bool proof_carrier{stack.size() == 2 && flockroot::HasProofMagic(stack[1])};
+        if (stack.size() == 1 || proof_carrier) {
+            const valtype& payload = stack.front();
+            if (payload.size() != 96 && payload.size() != 97) {
                 return set_error(serror, SCRIPT_ERR_SCHNORR_SIG_SIZE);
             }
-            if (ordinary && sig.size() == 65 && sig.back() == SIGHASH_DEFAULT) {
+            if (payload.size() == 97 && payload[64] == SIGHASH_DEFAULT) {
                 return set_error(serror, SCRIPT_ERR_SCHNORR_SIG_HASHTYPE);
             }
-            // The recoverable EC relation and companion PQ authorization are checked once per block.
+            // The BIP-340 signature, explicit tweak, and companion PQ authorization are checked once per block.
             return set_success(serror);
         }
 
@@ -2188,7 +2183,8 @@ size_t static WitnessSigOps(int witversion, const std::vector<unsigned char>& wi
     }
 
     if (witversion == 2 && witprogram.size() == WITNESS_V2_FLOCKROOT_SIZE) {
-        return witness.stack.size() == 1 ? 1 : 0;
+        const bool proof_carrier{witness.stack.size() == 2 && flockroot::HasProofMagic(witness.stack[1])};
+        return (witness.stack.size() == 1 || proof_carrier) ? 1 : 0;
     }
 
     // Future flags may be implemented here.

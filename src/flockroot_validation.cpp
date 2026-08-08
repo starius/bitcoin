@@ -15,7 +15,6 @@
 #include <array>
 #include <cstdint>
 #include <limits>
-#include <optional>
 #include <span>
 #include <string>
 #include <vector>
@@ -43,10 +42,10 @@ bool IsFlockrootOutput(const CScript& script, std::vector<unsigned char>& progra
 bool ExtractCarrier(const std::vector<unsigned char>& carrier,
                     std::vector<unsigned char>& proof,
                     bool& proof_found,
-                    std::string& error)
+    std::string& error)
 {
     if (proof_found) {
-        error = "multiple Flockroot coinbase proof carriers";
+        error = "multiple Flockroot proof carriers";
         return false;
     }
     if (carrier.size() < PROOF_HEADER_SIZE) {
@@ -68,33 +67,12 @@ bool ExtractCarrier(const std::vector<unsigned char>& carrier,
 
 } // namespace
 
-bool ExtractCoinbaseProof(const CTransaction& coinbase,
-                          std::vector<unsigned char>& proof,
-                          bool& proof_found,
-                          std::string& error)
-{
-    if (!coinbase.IsCoinBase()) {
-        error = "Flockroot proof source is not coinbase";
-        return false;
-    }
-    for (const CTxOut& output : coinbase.vout) {
-        const CScript& script{output.scriptPubKey};
-        if (script.empty() || script.front() != OP_RETURN) continue;
-        auto cursor{script.begin()};
-        opcodetype opcode;
-        std::vector<unsigned char> carrier;
-        if (!script.GetOp(cursor, opcode) || opcode != OP_RETURN) continue;
-        if (!script.GetOp(cursor, opcode, carrier) || opcode > OP_PUSHDATA4 || cursor != script.end()) continue;
-        if (!HasProofMagic(carrier)) continue;
-        if (!ExtractCarrier(carrier, proof, proof_found, error)) return false;
-    }
-    return true;
-}
-
 bool CollectTransactionStatements(const CTransaction& tx,
                                   const CCoinsViewCache& inputs,
                                   PrecomputedTransactionData& txdata,
                                   std::vector<Statement>& statements,
+                                  std::vector<unsigned char>& proof,
+                                  bool& proof_found,
                                   std::string& error)
 {
     std::vector<std::pair<size_t, std::vector<unsigned char>>> flockroot_inputs;
@@ -103,38 +81,19 @@ bool CollectTransactionStatements(const CTransaction& tx,
         std::vector<unsigned char> program;
         if (!IsFlockrootOutput(coin.out.scriptPubKey, program)) continue;
         const CScriptWitness& witness{tx.vin[input_index].scriptWitness};
-        if (witness.stack.size() == 1) {
-            flockroot_inputs.emplace_back(input_index, std::move(program));
+        const bool has_carrier{witness.stack.size() == 2 && HasProofMagic(witness.stack[1])};
+        if (has_carrier && !ExtractCarrier(witness.stack[1], proof, proof_found, error)) {
+            return false;
         }
-    }
-    if (flockroot_inputs.empty()) return true;
-
-    std::optional<unsigned char> cisa_mode;
-    for (const auto& [input_index, _] : flockroot_inputs) {
-        const auto& payload{tx.vin[input_index].scriptWitness.stack.front()};
-        const bool is_cisa{payload.size() != 64 && !payload.empty() && IsCisaMarker(payload.back())};
-        if (is_cisa) {
-            const unsigned char mode{static_cast<unsigned char>(payload.back() & ~CISA_NEGATED_BIT)};
-            if (cisa_mode && *cisa_mode != mode) {
-                error = "mixed CISA modes in one transaction";
-                return false;
-            }
-            cisa_mode = mode;
-        } else if (cisa_mode) {
-            error = "mixed ordinary and CISA Flockroot key spends";
+        if ((witness.stack.size() == 1 || has_carrier) &&
+            (witness.stack[0].size() == 96 || witness.stack[0].size() == 97)) {
+            flockroot_inputs.emplace_back(input_index, std::move(program));
+        } else if (has_carrier) {
+            error = "invalid Flockroot proof-carrier witness";
             return false;
         }
     }
-    if (cisa_mode) {
-        for (const auto& [input_index, _] : flockroot_inputs) {
-            const auto& payload{tx.vin[input_index].scriptWitness.stack.front()};
-            if (payload.empty() ||
-                (payload.back() & ~CISA_NEGATED_BIT) != *cisa_mode) {
-                error = "mixed ordinary and CISA Flockroot key spends";
-                return false;
-            }
-        }
-    }
+    if (flockroot_inputs.empty()) return true;
 
     if (!txdata.m_spent_outputs_ready) {
         std::vector<CTxOut> spent_outputs;
@@ -148,13 +107,15 @@ bool CollectTransactionStatements(const CTransaction& tx,
     const uint32_t group{static_cast<uint32_t>(statements.size())};
     for (const auto& [input_index, program] : flockroot_inputs) {
         const CScriptWitness& witness{tx.vin[input_index].scriptWitness};
-        if (witness.stack.size() != 1) {
+        if (witness.stack.empty() || witness.stack.size() > 2) {
             error = "invalid Flockroot key-spend witness";
             return false;
         }
+        const auto& witness_payload{witness.stack[0]};
         uint8_t hash_type{SIGHASH_DEFAULT};
-        if (!cisa_mode && witness.stack[0].size() == 65) {
-            hash_type = witness.stack[0].back();
+        const size_t tweak_offset{witness_payload.size() == 97 ? 65U : 64U};
+        if (witness_payload.size() == 97) {
+            hash_type = witness_payload[64];
             if (hash_type == SIGHASH_DEFAULT) {
                 error = "invalid Flockroot Schnorr sighash byte";
                 return false;
@@ -173,11 +134,10 @@ bool CollectTransactionStatements(const CTransaction& tx,
         statement.group = group;
         std::copy(program.begin(), program.end(), statement.output_key.begin());
         statement.sighash = sighash;
-        if (cisa_mode) {
-            statement.payload = witness.stack[0];
-        } else {
-            statement.payload.assign(witness.stack[0].begin(), witness.stack[0].begin() + 64);
-        }
+        statement.payload.assign(witness_payload.begin(), witness_payload.begin() + 64);
+        statement.payload.insert(statement.payload.end(),
+                                 witness_payload.begin() + tweak_offset,
+                                 witness_payload.end());
     }
     return true;
 }
