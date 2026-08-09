@@ -2,12 +2,11 @@
 """End-to-end prototype test for witness-v2 Flockroot block authorization."""
 
 import copy
-from concurrent.futures import ProcessPoolExecutor
+import hashlib
 import json
 import os
 from pathlib import Path
 import subprocess
-import sys
 import time
 
 from test_framework.blocktools import (
@@ -51,18 +50,7 @@ PROOF_VERSION = 1
 TARGET_BLOCK_WEIGHT = 3_950_000
 FILLER_CHUNK_SIZE = 8_000
 NORMAL_TAPROOT_SPENDS_PER_MODE = 8
-
-
-def sign_shrincs_job(job):
-    shrincs_dir, message, secret_key, state_counter = job
-    if shrincs_dir not in sys.path:
-        sys.path.insert(0, shrincs_dir)
-    from shrincs import shrincs_sign
-
-    signature = shrincs_sign(message, secret_key, state_counter, None)
-    if signature is None:
-        raise RuntimeError(f"SHRINCS signing failed at state {state_counter}")
-    return signature
+MAX_FUNDING_OUTPUTS = 2_000
 
 
 def pq_leaf(public_key):
@@ -96,7 +84,6 @@ class FlockrootTest(BitcoinTestFramework):
 
     def add_options(self, parser):
         parser.add_argument("--flockroot-cli", required=True)
-        parser.add_argument("--shrincs-dir", required=True)
         parser.add_argument("--artifact-dir", required=True)
         parser.add_argument("--flockroot-spends", default=16, type=int)
         parser.add_argument("--shrincs-workers", default=1, type=int)
@@ -147,24 +134,61 @@ class FlockrootTest(BitcoinTestFramework):
         artifact_dir = Path(self.options.artifact_dir)
         artifact_dir.mkdir(parents=True, exist_ok=True)
 
-        sys.path.insert(0, self.options.shrincs_dir)
-        from shrincs import FXMSS_SHAPE_BALANCED, shrincs_keygen
-
         spend_count = self.options.flockroot_spends
         assert 0 < spend_count <= 16_384
-        tree_depth = max(1, (spend_count - 1).bit_length())
-        shrincs_secret, shrincs_public = shrincs_keygen(
-            bytes(range(48)), bytes([FXMSS_SHAPE_BALANCED, tree_depth])
+        shrincs_workers = self.options.shrincs_workers
+        assert 0 < shrincs_workers <= (os.cpu_count() or 1)
+        rust_env = os.environ.copy()
+        rust_env["RAYON_NUM_THREADS"] = str(shrincs_workers)
+
+        shrincs_seeds_path = artifact_dir / "shrincs-seeds.json"
+        shrincs_keys_path = artifact_dir / "shrincs-keys.json"
+        shrincs_seeds = [
+            hashlib.sha512(
+                b"Flockroot independent SHRINCS key" + index.to_bytes(8, "big")
+            ).digest()[:48].hex()
+            for index in range(spend_count + 1)
+        ]
+        shrincs_seeds_path.write_text(json.dumps(shrincs_seeds) + "\n")
+        shrincs_keygen_start = time.perf_counter()
+        subprocess.run(
+            [
+                self.options.flockroot_cli,
+                "keygen-stateful-batch",
+                "--seeds",
+                str(shrincs_seeds_path),
+                "--output",
+                str(shrincs_keys_path),
+                "--depth",
+                "1",
+            ],
+            check=True,
+            env=rust_env,
         )
+        shrincs_keygen_seconds = time.perf_counter() - shrincs_keygen_start
+        generated_keys = json.loads(shrincs_keys_path.read_text())
+        assert_equal(len(generated_keys), spend_count + 1)
+        shrincs_keys = []
+        for generated in generated_keys:
+            public = generated["public_key"]
+            public_bytes = bytes.fromhex(
+                public["pk_seed"] + public["sl_root"] + public["sf_root"]
+            )
+            shrincs_keys.append({
+                "secret": bytes.fromhex(generated["secret_key"]),
+                "public": public_bytes,
+            })
+
         key_records = []
         next_internal_secret = 1
         for index in range(spend_count):
+            shrincs_key = shrincs_keys[index]
             internal_secret = next_internal_secret.to_bytes(32, "big")
             tap_path = [
                 TaggedHash("Flockroot/TestSibling", index.to_bytes(4, "big") + level.to_bytes(1, "big"))
                 for level in range(index % 5)
             ]
-            derived = derive_flockroot_key(internal_secret, shrincs_public, tap_path)
+            derived = derive_flockroot_key(internal_secret, shrincs_key["public"], tap_path)
             (
                 internal_key,
                 tap_tweak,
@@ -183,6 +207,8 @@ class FlockrootTest(BitcoinTestFramework):
                 "output_key": output_key,
                 "output_negated": output_negated,
                 "tap_path": tap_path,
+                "shrincs_secret": shrincs_key["secret"],
+                "shrincs_public": shrincs_key["public"],
                 "script_pubkey": CScript([OP_2, output_key]),
                 "address": encode_segwit_address("bcrt", 2, output_key),
             })
@@ -197,11 +223,15 @@ class FlockrootTest(BitcoinTestFramework):
         other_leaf = TaggedHash(
             "TapLeaf", bytes([LEAF_VERSION_TAPSCRIPT]) + ser_string(other_script)
         )
-        pq_node = TaggedHash("TapBranch", b"".join(sorted([pq_leaf(shrincs_public), other_leaf])))
+        script_shrincs_key = shrincs_keys[spend_count]
+        pq_node = TaggedHash(
+            "TapBranch",
+            b"".join(sorted([pq_leaf(script_shrincs_key["public"]), other_leaf])),
+        )
         script_tap_path = [other_leaf, script_root]
         script_internal_secret = next_internal_secret.to_bytes(32, "big")
         script_derived = derive_flockroot_key(
-            script_internal_secret, shrincs_public, script_tap_path
+            script_internal_secret, script_shrincs_key["public"], script_tap_path
         )
         (
             script_internal_key,
@@ -235,22 +265,41 @@ class FlockrootTest(BitcoinTestFramework):
         )
 
         ordinary_count = 2 * NORMAL_TAPROOT_SPENDS_PER_MODE
-        funding = wallet.create_self_transfer_multi(
-            num_outputs=spend_count + 1 + ordinary_count,
-            fee_per_output=2_000,
-        )
-        funding_tx = funding["tx"]
-        for output, key_record in zip(funding_tx.vout[:spend_count], key_records):
-            output.scriptPubKey = key_record["script_pubkey"]
-        funding_tx.vout[spend_count].scriptPubKey = flockroot_script_tree
         normal_key_start = spend_count + 1
         normal_script_start = normal_key_start + NORMAL_TAPROOT_SPENDS_PER_MODE
-        for index in range(normal_key_start, normal_script_start):
-            funding_tx.vout[index].scriptPubKey = normal_key_taproot.scriptPubKey
-        for index in range(normal_script_start, normal_script_start + NORMAL_TAPROOT_SPENDS_PER_MODE):
-            funding_tx.vout[index].scriptPubKey = normal_script_taproot.scriptPubKey
-        funding_txid = node0.sendrawtransaction(funding_tx.serialize().hex())
-        assert_equal(funding_txid, funding_tx.txid_hex)
+        funding_scripts = [record["script_pubkey"] for record in key_records]
+        funding_scripts.append(flockroot_script_tree)
+        funding_scripts.extend(
+            [normal_key_taproot.scriptPubKey] * NORMAL_TAPROOT_SPENDS_PER_MODE
+        )
+        funding_scripts.extend(
+            [normal_script_taproot.scriptPubKey] * NORMAL_TAPROOT_SPENDS_PER_MODE
+        )
+        assert_equal(len(funding_scripts), spend_count + 1 + ordinary_count)
+
+        funding_txs = []
+        funding_txids = []
+        funding_outpoints = []
+        funding_outputs = []
+        for offset in range(0, len(funding_scripts), MAX_FUNDING_OUTPUTS):
+            scripts = funding_scripts[offset:offset + MAX_FUNDING_OUTPUTS]
+            funding = wallet.create_self_transfer_multi(
+                num_outputs=len(scripts),
+                fee_per_output=2_000,
+                confirmed_only=True,
+            )
+            funding_tx = funding["tx"]
+            for output, script_pubkey in zip(funding_tx.vout, scripts):
+                output.scriptPubKey = script_pubkey
+            funding_txid = node0.sendrawtransaction(funding_tx.serialize().hex())
+            assert_equal(funding_txid, funding_tx.txid_hex)
+            funding_txs.append(funding_tx)
+            funding_txids.append(funding_txid)
+            funding_outpoints.extend(
+                COutPoint(funding_tx.txid_int, index)
+                for index in range(len(funding_tx.vout))
+            )
+            funding_outputs.extend(funding_tx.vout)
         self.generate(wallet, 1)
 
         transactions = []
@@ -259,6 +308,7 @@ class FlockrootTest(BitcoinTestFramework):
 
         def append_authorization(index, sighash, shrincs_signature):
             key_record = key_records[index]
+            shrincs_public = key_record["shrincs_public"]
             authorizations.append({
                 "output_key": key_record["output_key"].hex(),
                 "internal_key": key_record["internal_key"].hex(),
@@ -276,10 +326,10 @@ class FlockrootTest(BitcoinTestFramework):
         for index in range(spend_count):
             key_record = key_records[index]
             tx = CTransaction()
-            tx.vin = [CTxIn(COutPoint(funding_tx.txid_int, index))]
-            tx.vout = [CTxOut(funding_tx.vout[index].nValue - fee_per_spend, CScript([OP_TRUE]))]
+            tx.vin = [CTxIn(funding_outpoints[index])]
+            tx.vout = [CTxOut(funding_outputs[index].nValue - fee_per_spend, CScript([OP_TRUE]))]
             sighash = TaprootSignatureHash(
-                tx, [funding_tx.vout[index]], SIGHASH_DEFAULT, input_index=0
+                tx, [funding_outputs[index]], SIGHASH_DEFAULT, input_index=0
             )
             signature = sign_schnorr(key_record["output_secret"], sighash)
             assert_equal(len(signature), 64)
@@ -290,26 +340,40 @@ class FlockrootTest(BitcoinTestFramework):
             transactions.append(tx)
             signing_inputs.append((index, sighash))
 
-        shrincs_workers = self.options.shrincs_workers
-        assert 0 < shrincs_workers <= (os.cpu_count() or 1)
-        jobs = [
-            (self.options.shrincs_dir, sighash, shrincs_secret, index)
+        signing_request_path = artifact_dir / "shrincs-signing-request.json"
+        signatures_path = artifact_dir / "shrincs-signatures.json"
+        signing_request = [
+            {
+                "secret_key": key_records[index]["shrincs_secret"].hex(),
+                "leaf_index": 0,
+                "message": sighash.hex(),
+            }
             for index, sighash in signing_inputs
         ]
+        signing_request_path.write_text(json.dumps(signing_request) + "\n")
         shrincs_sign_start = time.perf_counter()
-        if shrincs_workers == 1:
-            signatures = list(map(sign_shrincs_job, jobs))
-        else:
-            with ProcessPoolExecutor(max_workers=shrincs_workers) as executor:
-                signatures = list(executor.map(sign_shrincs_job, jobs, chunksize=1))
+        subprocess.run(
+            [
+                self.options.flockroot_cli,
+                "sign-stateful-batch",
+                "--request",
+                str(signing_request_path),
+                "--output",
+                str(signatures_path),
+            ],
+            check=True,
+            env=rust_env,
+        )
         shrincs_sign_seconds = time.perf_counter() - shrincs_sign_start
+        signatures = [bytes.fromhex(value) for value in json.loads(signatures_path.read_text())]
+        assert_equal(len(signatures), spend_count)
         for (index, sighash), shrincs_signature in zip(signing_inputs, signatures):
             append_authorization(index, sighash, shrincs_signature)
 
         script_tx = CTransaction()
-        script_tx.vin = [CTxIn(COutPoint(funding_tx.txid_int, spend_count))]
+        script_tx.vin = [CTxIn(funding_outpoints[spend_count])]
         script_tx.vout = [CTxOut(
-            funding_tx.vout[spend_count].nValue - fee_per_spend,
+            funding_outputs[spend_count].nValue - fee_per_spend,
             CScript([OP_TRUE]),
         )]
         script_tx.wit.vtxinwit = [CTxInWitness()]
@@ -327,13 +391,13 @@ class FlockrootTest(BitcoinTestFramework):
 
         for output_index in range(normal_key_start, normal_script_start):
             tx = CTransaction()
-            tx.vin = [CTxIn(COutPoint(funding_tx.txid_int, output_index))]
+            tx.vin = [CTxIn(funding_outpoints[output_index])]
             tx.vout = [CTxOut(
-                funding_tx.vout[output_index].nValue - fee_per_spend,
+                funding_outputs[output_index].nValue - fee_per_spend,
                 CScript([OP_TRUE]),
             )]
             sighash = TaprootSignatureHash(
-                tx, [funding_tx.vout[output_index]], SIGHASH_DEFAULT, input_index=0
+                tx, [funding_outputs[output_index]], SIGHASH_DEFAULT, input_index=0
             )
             tx.wit.vtxinwit = [CTxInWitness()]
             tx.wit.vtxinwit[0].scriptWitness.stack = [
@@ -346,9 +410,9 @@ class FlockrootTest(BitcoinTestFramework):
             normal_script_start + NORMAL_TAPROOT_SPENDS_PER_MODE,
         ):
             tx = CTransaction()
-            tx.vin = [CTxIn(COutPoint(funding_tx.txid_int, output_index))]
+            tx.vin = [CTxIn(funding_outpoints[output_index])]
             tx.vout = [CTxOut(
-                funding_tx.vout[output_index].nValue - fee_per_spend,
+                funding_outputs[output_index].nValue - fee_per_spend,
                 CScript([OP_TRUE]),
             )]
             tx.wit.vtxinwit = [CTxInWitness()]
@@ -397,7 +461,9 @@ class FlockrootTest(BitcoinTestFramework):
         )
         assert_equal(node0.submitblock(tampered_block.serialize().hex()), "bad-flockroot-proof")
 
-        if spend_count > 1:
+        if spend_count > 1 and workload_block.get_weight() + len(
+            ser_string(PROOF_MAGIC + bytes([PROOF_VERSION]) + proof)
+        ) <= 4_000_000:
             duplicate_block, _ = self.make_block(
                 transactions,
                 total_fees,
@@ -430,7 +496,9 @@ class FlockrootTest(BitcoinTestFramework):
         assert_equal(node1.submitblock(block.serialize().hex()), None)
         second_validation_seconds = time.perf_counter() - second_validation_start
 
-        (artifact_dir / "funding-transaction.hex").write_text(funding_tx.serialize().hex() + "\n")
+        (artifact_dir / "funding-transactions.json").write_text(
+            json.dumps([tx.serialize().hex() for tx in funding_txs], indent=2) + "\n"
+        )
         (artifact_dir / "spending-transactions.json").write_text(
             json.dumps([tx.serialize().hex() for tx in transactions], indent=2) + "\n"
         )
@@ -443,6 +511,8 @@ class FlockrootTest(BitcoinTestFramework):
                 "ec_output_key": record["output_key"].hex(),
                 "tap_tweak": record["tap_tweak"].hex(),
                 "signed_tweak": record["signed_tweak"].hex(),
+                "shrincs_secret": record["shrincs_secret"].hex(),
+                "shrincs_public": record["shrincs_public"].hex(),
                 "script_pubkey": record["script_pubkey"].hex(),
                 "address": record["address"],
             } for record in key_records],
@@ -451,8 +521,8 @@ class FlockrootTest(BitcoinTestFramework):
             "script_path_output_secret": script_output_secret.hex(),
             "script_path_output_key": script_output_key.hex(),
             "script_path_tap_tweak": script_tap_tweak.hex(),
-            "shrincs_secret": shrincs_secret.hex(),
-            "shrincs_public": shrincs_public.hex(),
+            "script_path_shrincs_secret": script_shrincs_key["secret"].hex(),
+            "script_path_shrincs_public": script_shrincs_key["public"].hex(),
             "script_pubkey": key_records[0]["script_pubkey"].hex(),
             "address": key_records[0]["address"],
             "script_path_address": flockroot_script_address,
@@ -478,6 +548,9 @@ class FlockrootTest(BitcoinTestFramework):
             "key_spend_payload_bytes_each": 96,
             "key_spend_payload_bytes_total": 96 * spend_count,
             "stateful_pq_spends": spend_count,
+            "independent_shrincs_keys": len(shrincs_keys),
+            "shrincs_key_depth": 1,
+            "shrincs_keygen_seconds": shrincs_keygen_seconds,
             "shrincs_sign_workers": shrincs_workers,
             "shrincs_sign_seconds": shrincs_sign_seconds,
             "stateless_pq_spends": 0,
@@ -506,7 +579,7 @@ class FlockrootTest(BitcoinTestFramework):
             "validation_node0_seconds": validation_seconds,
             "validation_node1_seconds": second_validation_seconds,
             "block_hash": block.hash_hex,
-            "funding_txid": funding_txid,
+            "funding_txids": funding_txids,
             "address": flockroot_address,
             "spending_txids": [tx.txid_hex for tx in transactions],
         }
