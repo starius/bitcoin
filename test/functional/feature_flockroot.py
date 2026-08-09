@@ -2,7 +2,9 @@
 """End-to-end prototype test for witness-v2 Flockroot block authorization."""
 
 import copy
+from concurrent.futures import ProcessPoolExecutor
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -51,6 +53,18 @@ FILLER_CHUNK_SIZE = 8_000
 NORMAL_TAPROOT_SPENDS_PER_MODE = 8
 
 
+def sign_shrincs_job(job):
+    shrincs_dir, message, secret_key, state_counter = job
+    if shrincs_dir not in sys.path:
+        sys.path.insert(0, shrincs_dir)
+    from shrincs import shrincs_sign
+
+    signature = shrincs_sign(message, secret_key, state_counter, None)
+    if signature is None:
+        raise RuntimeError(f"SHRINCS signing failed at state {state_counter}")
+    return signature
+
+
 def pq_leaf(public_key):
     return TaggedHash("Flockroot/PQLeaf", bytes([0]) + public_key)
 
@@ -85,6 +99,7 @@ class FlockrootTest(BitcoinTestFramework):
         parser.add_argument("--shrincs-dir", required=True)
         parser.add_argument("--artifact-dir", required=True)
         parser.add_argument("--flockroot-spends", default=16, type=int)
+        parser.add_argument("--shrincs-workers", default=1, type=int)
 
     def make_block(self, transactions, fees, proof=None, duplicate_proof=False, fill=False):
         node = self.nodes[0]
@@ -133,10 +148,10 @@ class FlockrootTest(BitcoinTestFramework):
         artifact_dir.mkdir(parents=True, exist_ok=True)
 
         sys.path.insert(0, self.options.shrincs_dir)
-        from shrincs import FXMSS_SHAPE_BALANCED, shrincs_keygen, shrincs_sign
+        from shrincs import FXMSS_SHAPE_BALANCED, shrincs_keygen
 
         spend_count = self.options.flockroot_spends
-        assert 0 < spend_count <= 256
+        assert 0 < spend_count <= 16_384
         tree_depth = max(1, (spend_count - 1).bit_length())
         shrincs_secret, shrincs_public = shrincs_keygen(
             bytes(range(48)), bytes([FXMSS_SHAPE_BALANCED, tree_depth])
@@ -242,10 +257,8 @@ class FlockrootTest(BitcoinTestFramework):
         authorizations = []
         fee_per_spend = 1_000
 
-        def append_authorization(index, sighash):
+        def append_authorization(index, sighash, shrincs_signature):
             key_record = key_records[index]
-            shrincs_signature = shrincs_sign(sighash, shrincs_secret, index, None)
-            assert shrincs_signature is not None
             authorizations.append({
                 "output_key": key_record["output_key"].hex(),
                 "internal_key": key_record["internal_key"].hex(),
@@ -259,6 +272,7 @@ class FlockrootTest(BitcoinTestFramework):
                 "signature": {"bytes": shrincs_signature.hex()},
             })
 
+        signing_inputs = []
         for index in range(spend_count):
             key_record = key_records[index]
             tx = CTransaction()
@@ -274,7 +288,23 @@ class FlockrootTest(BitcoinTestFramework):
             tx.wit.vtxinwit = [CTxInWitness()]
             tx.wit.vtxinwit[0].scriptWitness.stack = [payload]
             transactions.append(tx)
-            append_authorization(index, sighash)
+            signing_inputs.append((index, sighash))
+
+        shrincs_workers = self.options.shrincs_workers
+        assert 0 < shrincs_workers <= (os.cpu_count() or 1)
+        jobs = [
+            (self.options.shrincs_dir, sighash, shrincs_secret, index)
+            for index, sighash in signing_inputs
+        ]
+        shrincs_sign_start = time.perf_counter()
+        if shrincs_workers == 1:
+            signatures = list(map(sign_shrincs_job, jobs))
+        else:
+            with ProcessPoolExecutor(max_workers=shrincs_workers) as executor:
+                signatures = list(executor.map(sign_shrincs_job, jobs, chunksize=1))
+        shrincs_sign_seconds = time.perf_counter() - shrincs_sign_start
+        for (index, sighash), shrincs_signature in zip(signing_inputs, signatures):
+            append_authorization(index, sighash, shrincs_signature)
 
         script_tx = CTransaction()
         script_tx.vin = [CTxIn(COutPoint(funding_tx.txid_int, spend_count))]
@@ -448,6 +478,8 @@ class FlockrootTest(BitcoinTestFramework):
             "key_spend_payload_bytes_each": 96,
             "key_spend_payload_bytes_total": 96 * spend_count,
             "stateful_pq_spends": spend_count,
+            "shrincs_sign_workers": shrincs_workers,
+            "shrincs_sign_seconds": shrincs_sign_seconds,
             "stateless_pq_spends": 0,
             "script_path_spends": 1,
             "ordinary_taproot_key_spends": NORMAL_TAPROOT_SPENDS_PER_MODE,
